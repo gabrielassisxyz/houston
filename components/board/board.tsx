@@ -1,0 +1,295 @@
+"use client";
+import * as React from "react";
+import {
+  DndContext,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  closestCorners,
+  pointerWithin,
+  DragOverlay,
+  type CollisionDetection,
+  type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
+} from "@dnd-kit/core";
+import { arrayMove } from "@dnd-kit/sortable";
+import { Icon } from "@/components/icons";
+import { useApp } from "@/components/app-context";
+import { useSetStatus } from "@/hooks/use-beads";
+import { useOrder, useSetOrder } from "@/hooks/use-order";
+import { useBoardPrefs } from "@/hooks/use-board-prefs";
+import { useUrlFilters } from "@/hooks/use-url-filters";
+import { useDoneWindow } from "@/hooks/use-done-window";
+import { ALL_PROJECT_ID, displayId, projectOf } from "@/lib/aggregate";
+import { isBlocked, childrenCountMap } from "@/lib/beads-view";
+import { FilterBar } from "@/components/filter-bar";
+import { DoneWindowSelect } from "@/components/done-window-select";
+import { matchesFilters, labelOptionsFrom, assigneeOptionsFrom, projectOptionsFrom } from "@/lib/filters";
+import {
+  BOARD_COLUMNS as COLUMNS,
+  sortBoardCards,
+  type BoardSortMode,
+} from "@/lib/board-columns";
+import { BeadCardOverlay } from "./bead-card";
+import { Column } from "./column";
+import type { Bead } from "@/lib/schema";
+
+// Whatever is under the pointer wins. pointerWithin sorts its hits by the average distance
+// from the pointer to each rect's corners, so a card beats the much taller column that
+// contains it, and empty space low in a short column stays a valid target. closestCorners
+// alone can prefer a card in a long neighboring column whose corners sit nearer the
+// dragged card's. It remains the fallback when the pointer is between columns.
+const pointerFirstCollision: CollisionDetection = (args) => {
+  const underPointer = pointerWithin(args);
+  return underPointer.length > 0 ? underPointer : closestCorners(args);
+};
+
+export function Board() {
+  const { beads, index, meta, humanAllowlist, openCreate, loading, projectId, readOnly } = useApp();
+  const hasManualOrder = projectId !== ALL_PROJECT_ID;
+  const setStatus = useSetStatus();
+  const { data: orderData } = useOrder(projectId, hasManualOrder);
+  const setOrder = useSetOrder(projectId);
+  const { prefs: boardPrefs, setPrefs: setBoardPrefs } = useBoardPrefs();
+  const sortMode: BoardSortMode =
+    !hasManualOrder && boardPrefs.sortMode === "manual" ? "priority" : boardPrefs.sortMode;
+  const orders = React.useMemo(() => orderData?.orders ?? {}, [orderData]);
+  const { filters, setFilters, showArchived, setShowArchived, clearFilters } =
+    useUrlFilters();
+  const { doneWindow, setDoneWindow, inWindow } = useDoneWindow();
+  // Derived from ALL beads (not the filtered set) so selecting one label
+  // doesn't make the remaining options vanish from the dropdown.
+  const labelOptions = React.useMemo(() => labelOptionsFrom(beads), [beads]);
+  const assigneeOptions = React.useMemo(() => assigneeOptionsFrom(beads), [beads]);
+  const projectOptions = React.useMemo(() => projectOptionsFrom(beads), [beads]);
+  // One pass over all beads, not childrenOf() per card — that would be O(n^2)
+  // on a large board.
+  const childCounts = React.useMemo(() => childrenCountMap(beads), [beads]);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+  );
+
+  // The card being dragged and the column under the pointer. The card renders in a
+  // DragOverlay so it can travel across columns; in place it is confined to (and
+  // clipped by) its own column's list.
+  const [draggingId, setDraggingId] = React.useState<string | null>(null);
+  const [overColumnId, setOverColumnId] = React.useState<string | null>(null);
+
+  const matchFilters = React.useCallback(
+    (b: Bead) => {
+      if (b.issue_type === "epic") return false;
+      if (!showArchived && (b.labels ?? []).includes("archived")) return false;
+      return matchesFilters(b, filters, humanAllowlist);
+    },
+    [filters, showArchived, humanAllowlist],
+  );
+
+  // The window drops only closed beads from what is shown; `index` and `childCounts` keep
+  // reading the whole list, so blocked state and subtask counts do not depend on it.
+  const visible = React.useMemo(
+    () => beads.filter(matchFilters).filter(inWindow),
+    [beads, matchFilters, inWindow],
+  );
+  const columns = React.useMemo(
+    () =>
+      COLUMNS.map((c) => {
+        const cards = visible.filter((b) => c.test(b, isBlocked(b, index)));
+        return {
+          col: c,
+          cards: sortBoardCards(cards, sortMode, orders[c.id]),
+        };
+      }),
+    [visible, index, orders, sortMode],
+  );
+
+  // Hide the Blocked column when it's empty, unless the user pinned it to always
+  // show (bead mo3). Drag logic below still uses the full `columns` set; a hidden
+  // Blocked column has zero cards, so nothing is ever dropped into or out of it.
+  const shownColumns = React.useMemo(
+    () =>
+      columns.filter(
+        ({ col, cards }) =>
+          col.id !== "blocked" || cards.length > 0 || boardPrefs.blockedColumn === "always",
+      ),
+    [columns, boardPrefs.blockedColumn],
+  );
+
+  // Which column each visible bead currently sits in (drag targets resolve here).
+  const colOfBead = React.useMemo(() => {
+    const m = new Map<string, string>();
+    for (const { col, cards } of columns) for (const b of cards) m.set(b.id, col.id);
+    return m;
+  }, [columns]);
+
+  // `over` is a column id (pointer over empty column space) or a bead id (over a card).
+  function columnUnder(overId: string | null): string | undefined {
+    if (!overId) return undefined;
+    return COLUMNS.some((c) => c.id === overId) ? overId : colOfBead.get(overId);
+  }
+
+  function endDrag() {
+    setDraggingId(null);
+    setOverColumnId(null);
+  }
+
+  function onDragStart(e: DragStartEvent) {
+    setDraggingId(String(e.active.id));
+  }
+
+  function onDragOver(e: DragOverEvent) {
+    setOverColumnId(columnUnder(e.over?.id ? String(e.over.id) : null) ?? null);
+  }
+
+  function onDragEnd(e: DragEndEvent) {
+    endDrag();
+    if (readOnly) return;
+    const activeId = String(e.active.id);
+    const overRaw = e.over?.id ? String(e.over.id) : null;
+    if (!overRaw) return;
+
+    const activeCol = colOfBead.get(activeId);
+    if (!activeCol) return;
+
+    const overCol = columnUnder(overRaw);
+    if (!overCol) return;
+
+    if (overCol !== activeCol) {
+      // Cross-column → status change (existing behavior).
+      const target = COLUMNS.find((c) => c.id === overCol);
+      if (!target || !target.droppable || !target.status) return;
+      const bead = index.get(activeId);
+      if (!bead || bead.status === target.status) return;
+      setStatus.mutate({ id: displayId(bead), projectId: projectOf(bead)?.id, status: target.status });
+      return;
+    }
+
+    if (sortMode !== "manual") return;
+
+    // Within-column → reorder + persist the manual order.
+    const ids = (columns.find((c) => c.col.id === activeCol)?.cards ?? []).map((b) => b.id);
+    const oldIndex = ids.indexOf(activeId);
+    const newIndex = overRaw === activeCol ? ids.length - 1 : ids.indexOf(overRaw);
+    if (oldIndex === -1 || newIndex === -1 || oldIndex === newIndex) return;
+    setOrder.mutate({ columnId: activeCol, ids: arrayMove(ids, oldIndex, newIndex) });
+  }
+
+  const draggingBead = draggingId ? index.get(draggingId) : undefined;
+  // Advertise only a column that a drop would actually move the card into.
+  const sourceColumnId = draggingId ? colOfBead.get(draggingId) : undefined;
+  const dropColumn = COLUMNS.find(
+    (c) => c.id === overColumnId && c.id !== sourceColumnId && c.droppable && c.status &&
+      draggingBead?.status !== c.status,
+  );
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <header className="flex flex-shrink-0 items-center gap-3 border-b border-border bg-[var(--surface)] p-[14px_22px]">
+        <div className="mr-1 flex flex-col gap-px">
+          <h1 className="m-0 text-base font-[650] tracking-[-.01em]">Board</h1>
+          <span className="text-[11.5px] text-[var(--text-3)]">
+            {visible.length} beads
+            {projectId === ALL_PROJECT_ID ? (
+              " · live from every project"
+            ) : meta?.kind === "br" ? (
+              <> · live from <span className="font-mono">br</span></>
+            ) : meta?.kind === "bd" ? (
+              <> · live from <span className="font-mono">bd list</span></>
+            ) : null}
+          </span>
+        </div>
+
+        <FilterBar
+          filters={filters}
+          onChange={setFilters}
+          labelOptions={labelOptions}
+          assigneeOptions={assigneeOptions}
+          projectOptions={projectOptions}
+          showArchived={showArchived}
+          onShowArchived={setShowArchived}
+          onClearAllAction={clearFilters}
+        />
+
+        <label
+          className="flex h-9 flex-shrink-0 items-center gap-[7px] rounded-[9px] border border-border bg-[var(--surface-2)] px-[10px] text-[12.5px] text-[var(--text-2)]"
+          title={
+            !hasManualOrder
+              ? "Drag cards between status columns"
+              : sortMode === "manual"
+                ? "Drag to reorder cards or move them between status columns"
+                : "Drag between status columns; choose Manual to reorder within a column"
+          }
+        >
+          <span className="font-medium">Sort</span>
+          <select
+            aria-label="Sort board cards"
+            value={sortMode}
+            onChange={(e) =>
+              setBoardPrefs({
+                ...boardPrefs,
+                sortMode: e.target.value as BoardSortMode,
+              })
+            }
+            className="cursor-pointer border-none bg-transparent text-[12.5px] font-semibold text-[var(--text)] outline-none"
+          >
+            <option value="priority">Priority</option>
+            <option value="updated">Recently updated</option>
+            {hasManualOrder && <option value="manual">Manual</option>}
+          </select>
+        </label>
+
+        {!readOnly && (
+          <button
+            onClick={() => openCreate()}
+            className="flex h-9 flex-shrink-0 items-center gap-[6px] rounded-[9px] px-[14px] text-[13px] font-[550] text-white"
+            style={{ background: "var(--brand)", boxShadow: "0 2px 8px -2px var(--brand)" }}
+          >
+            <Icon name="plus" size={15} />
+            <span>New</span>
+          </button>
+        )}
+      </header>
+
+      <div className="bd-scroll min-h-0 flex-1 overflow-x-auto overflow-y-hidden p-[18px_22px]">
+        {loading && beads.length === 0 ? (
+          <div className="text-[13px] text-[var(--text-3)]">Loading beads…</div>
+        ) : (
+          <DndContext
+            sensors={sensors}
+            collisionDetection={pointerFirstCollision}
+            onDragStart={onDragStart}
+            onDragOver={onDragOver}
+            onDragEnd={onDragEnd}
+            onDragCancel={endDrag}
+          >
+            <div className="flex h-full min-h-0 gap-4">
+              {shownColumns.map(({ col, cards }) => (
+                <Column
+                  key={col.id}
+                  col={col}
+                  cards={cards}
+                  childCounts={childCounts}
+                  manualSort={sortMode === "manual"}
+                  dropTarget={dropColumn?.id === col.id}
+                  control={
+                    col.id === "done" ? (
+                      <DoneWindowSelect value={doneWindow} onChange={setDoneWindow} />
+                    ) : undefined
+                  }
+                />
+              ))}
+            </div>
+            {/* No drop animation: a cross-column drop has already moved the card, so
+                animating the preview toward its old slot would read as a failed move. */}
+            <DragOverlay dropAnimation={null}>
+              {draggingBead ? (
+                <BeadCardOverlay bead={draggingBead} childCount={childCounts.get(draggingBead.id) ?? 0} />
+              ) : null}
+            </DragOverlay>
+          </DndContext>
+        )}
+      </div>
+    </div>
+  );
+}

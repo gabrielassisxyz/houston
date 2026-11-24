@@ -1,0 +1,69 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+# Keep the lockfile tracked: the Docker build runs `npm ci`, which requires it.
+# Overrides a `package-lock.json` entry in a contributor's global gitignore.
+!package-lock.json
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# graphify knowledge-graph output (generated tooling artifacts, not app source)
+/graphify-out/
+
+# local onboarding doc (generated, not app source)
+/ONBOARDING.md
+
+# local GitHub-issue triage notes and draft responses (working artifacts, not app source)
+/gh-issues-responses/
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# Tracker (br): `.beads/issues.jsonl` and the tracker's config are versioned with the code.
+# `.beads/.gitignore` keeps the local database, locks and backups out of git.
+# The app's publish feature writes generated output here when this repository is itself a
+# project in it.
+.beads/showcase/
+# bv (beads viewer) local config and caches
+.bv/
+# Dolt files (left by bd init)
+.dolt/
+*.db
+.beads-credential-key
+
+# Claude Code git worktrees — transient working copies of the repo, never source.
+# (Other .claude/ files like commands/ and settings.json stay tracked.)
+.claude/worktrees/
