@@ -14,9 +14,10 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 This repository tracks its own work with **br**
 ([beads_rust](https://github.com/Dicklesworthstone/beads_rust)), not with `bd`.
 
-- The tracker lives in `.beads/` of the main working tree. `issues.jsonl` is committed and is the
-  copy that travels with the code. The SQLite database beside it is local: `.beads/.gitignore`
-  keeps it out of git, and `br` rebuilds it from the JSONL in a fresh clone.
+- The tracker lives in `.beads/` of the main working tree, using the prefix `hou`.
+  `issues.jsonl` is committed and is the copy that travels with the code. The SQLite database
+  beside it is local: `.beads/.gitignore` keeps it out of git, and `br` rebuilds it from the
+  JSONL in a fresh clone.
 - **Every linked worktree shares that one tracker.** `br` run from a worktree reads and writes
   the main tree's database, not the copy of `.beads/` checked out in the worktree (`br where`
   shows it). So a claim made anywhere is visible everywhere at once.
@@ -62,10 +63,6 @@ survives.
   file back from the database, bead changes not yet landed included. This applies to every
   pull in the main tree, whether or not the merge touched the tracker. Then delete the remote
   branch and remove the worktree.
-- **Pull requests target this repository, never the project it started from.** A clone that
-  keeps the original project as a remote named `upstream`, to fetch its changes, makes `gh`
-  pick that remote as the base of a new pull request. Run `gh repo set-default` once per clone,
-  or pass `-R` with this repository's name. Nothing is ever pushed to `upstream`.
 - **Never destroy another session's work.** No force-push to a shared branch. No deleting a
   branch or a worktree that holds an unmerged commit or an uncommitted file. No `reset --hard`
   and no `checkout --` in a tree you did not create. A merge conflict is resolved by keeping
@@ -79,8 +76,9 @@ This is a grant for this repository. It says nothing about any other.
 There is no test runner and no `npm test`. The tests are standalone scripts under `scripts/`,
 run one at a time, and they come in three kinds:
 
-- **Pure**, no server: `node scripts/test-blocking.mjs`. They load a module from `lib/` without
-  a build (TypeScript transpile, then `vm`).
+- **Pure**, no server: `node scripts/test-blocking.mjs`, `node scripts/test-install-services.mjs`.
+  They test scripts directly or load a module from `lib/` without a build (TypeScript transpile,
+  then `vm`).
 - **Server-backed**: they drive the app over HTTP and need `SCOTTY_TEST_URL`. Run them through
   the wrapper, which starts an isolated server from the current build, runs the command and
   stops the server: `scripts/with-server.sh 3211 node scripts/test-br-store.mjs`.
@@ -100,10 +98,10 @@ What has to be true for a run to mean anything:
   `test-board-sorting`, `test-dependency-rows`, `test-epic-focus`, `test-focus`,
   `test-focus-grouping`, `test-keyboard`, `test-read-only`, `test-review-links` and
   `test-search-typing`. Without it each one fails on an assertion about a read-only control,
-  which reads like a regression and is not one. Do not set it for every run: seven scripts fail
+  which reads like a regression and is not one. Do not set it for every run: eight scripts fail
   under it, because they write through the API or expect a page that can be edited. They are
-  `test-all-page-writes`, `test-br-store`, `test-label-edits`, `test-project-chip`,
-  `test-sprint-picker`, `test-sprint-run` and `test-sprints`. Every other script passes either way. A new script
+  `test-all-page-writes`, `test-br-store`, `test-close-actor`, `test-label-edits`,
+  `test-project-chip`, `test-sprint-picker`, `test-sprint-run` and `test-sprints`. Every other script passes either way. A new script
   that writes through the API joins the second list, and its own read-only case goes through
   the viewer-mode cookie, not through the launch. Before calling a script red on `main`, run it
   both ways.
