@@ -109,4 +109,4 @@ self-updater removed.
 
 ## License
 
-[MIT](LICENSE) — original work copyright Brendan, modifications copyright Gabriel Assis.
+[MIT](LICENSE). See [LICENSE](LICENSE) for copyright notices.
