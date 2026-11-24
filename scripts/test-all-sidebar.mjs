@@ -126,7 +126,7 @@ try {
   assert.equal(await aside().count(), 1, "exactly one sidebar");
   assert.equal(await aside().isVisible(), true, "the sidebar is on screen");
   assert.equal(await asideWidth(), 228, "default width");
-  await aside().getByText("Bead Me Up Scotty", { exact: true }).waitFor();
+  await aside().getByText("Houston", { exact: true }).waitFor();
 
   step = "nav entries";
   assert.deepEqual(
@@ -150,7 +150,7 @@ try {
   await aside().getByText("reviewer", { exact: true }).waitFor();
   await aside().getByText("human actor", { exact: true }).waitFor();
   assert.equal(await aside().getByTitle("Toggle theme").count(), 1, "theme toggle");
-  assert.equal(await aside().getByRole("button", { name: /Report \/ request/ }).count(), 1, "report menu");
+  assert.equal(await aside().getByRole("button", { name: /Report \/ request/ }).count(), 0, "no report menu");
   assert.match(await aside().innerText(), /Build /, "build badge");
   assert.doesNotMatch(await aside().innerText(), /Level \d|XP/, "no level card over every project");
 

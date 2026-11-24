@@ -32,7 +32,7 @@ export function sprintFailure(err: unknown): { status: number; body: { error: st
 // config.json without sharing its cache or its write path.
 function defaultFile(): string {
   const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
-  return path.join(base, "bead-me-up-scotty", "sprints.json");
+  return path.join(base, "houston", "sprints.json");
 }
 
 export function createSprintStore(file: string = defaultFile()) {

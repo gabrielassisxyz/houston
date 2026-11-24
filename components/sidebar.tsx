@@ -4,17 +4,8 @@ import { Icon } from "@/components/icons";
 import { useTheme } from "@/components/theme-provider";
 import { useApp, type View } from "@/components/app-context";
 import { ProjectSwitcher } from "@/components/project-switcher";
-import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-} from "@/components/ui/dropdown-menu";
 import { initials, avatarColor, needsHuman, readyHumanGate } from "@/lib/beads-view";
 import { useGamification } from "@/hooks/use-beads";
-// GITHUB_REPO is shared with the build badge (where bug/feature issues are filed).
-import { GITHUB_REPO } from "@/lib/build-info";
 import { BuildBadge } from "@/components/build-badge";
 import { ResizeHandle } from "@/components/resize-handle";
 import { useResizableWidth } from "@/hooks/use-resizable-width";
@@ -22,22 +13,6 @@ import { cn } from "@/lib/utils";
 import { navViews, type ViewNavItem } from "@/lib/views";
 import { Sheet, SheetContent, SheetDescription, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Menu } from "lucide-react";
-
-function githubIssueUrl(kind: "bug" | "feature"): string {
-  const isBug = kind === "bug";
-  const params = new URLSearchParams({
-    title: isBug ? "[Bug] " : "[Feature] ",
-    labels: isBug ? "bug" : "enhancement",
-    body: isBug
-      ? "## Steps to reproduce\n\n1. \n2. \n\n## Expected\n\n## Actual\n\n---\n_Filed from Bead Me Up, Scotty_"
-      : "## Problem\n\n## Proposed solution\n\n---\n_Filed from Bead Me Up, Scotty_",
-  });
-  return `https://github.com/${GITHUB_REPO}/issues/new?${params.toString()}`;
-}
-
-function openIssue(kind: "bug" | "feature") {
-  window.open(githubIssueUrl(kind), "_blank", "noopener,noreferrer");
-}
 
 export interface SidebarProps {
   view: View;
@@ -94,7 +69,7 @@ export function Sidebar({
           <Icon name="logo" size={17} />
         </div>
         <div className="text-sm font-[650] leading-[1.15] tracking-[-.01em]">
-          Bead Me Up Scotty
+          Houston
         </div>
       </div>
 
@@ -157,24 +132,6 @@ export function Sidebar({
             </div>
           </div>
         )}
-        <DropdownMenu>
-          <DropdownMenuTrigger className="flex w-full items-center gap-[10px] rounded-[9px] border border-border bg-[var(--surface)] px-[10px] py-2 text-left text-[12.5px] font-medium text-[var(--text-2)] hover:bg-[var(--surface-2)] hover:text-[var(--text)] focus:outline-none">
-            <Icon name="bug" size={16} className="flex-shrink-0" />
-            <span className="flex-1">Report / request</span>
-            <Icon name="chevron" size={14} className="flex-shrink-0 text-[var(--text-3)]" />
-          </DropdownMenuTrigger>
-          <DropdownMenuContent className="w-[200px]">
-            <DropdownMenuLabel>Open a GitHub issue</DropdownMenuLabel>
-            <DropdownMenuItem onClick={() => openIssue("bug")}>
-              <Icon name="bug" size={14} style={{ color: "#ef4444" }} />
-              <span>Report a bug</span>
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => openIssue("feature")}>
-              <Icon name="feature" size={14} style={{ color: "var(--brand)" }} />
-              <span>Request a feature</span>
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
 
         <div className="flex items-center gap-2 px-1">
           <div
@@ -248,7 +205,7 @@ export function MobileSidebar(props: Omit<SidebarProps, "mobile" | "onProjectNav
         </SheetContent>
       </Sheet>
       <div className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-[var(--text)]">
-        Bead Me Up Scotty
+        Houston
       </div>
     </div>
   );

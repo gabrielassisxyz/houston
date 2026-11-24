@@ -1,12 +1,11 @@
 {
-  "name": "bead-me-up-scotty",
+  "name": "houston",
   "version": "0.4.0",
   "private": true,
   "license": "MIT",
-  "author": "Brendan <brendan@appstart.one>",
+  "author": "Gabriel Assis <gabrielassisdepaula@gmail.com>",
   "bin": {
-    "bead-me-up-scotty": "bin/bead-me-up-scotty.mjs",
-    "scotty": "bin/bead-me-up-scotty.mjs"
+    "houston-web": "bin/houston-web.mjs"
   },
   "files": [
     "bin",

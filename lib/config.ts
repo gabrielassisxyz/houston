@@ -92,7 +92,7 @@ export function lanePrefix(): string | null {
 
 function configDir(): string {
   const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
-  return path.join(base, "bead-me-up-scotty");
+  return path.join(base, "houston");
 }
 function configFile(): string {
   return path.join(configDir(), "config.json");
@@ -123,7 +123,7 @@ function gitUserName(): string | null {
 
 function defaults(): AppConfig {
   // Same order as bd's own actor (`bd --help`, --actor): BEADS_ACTOR, then git
-  // user.name, then the OS user. If Scotty stamped writes with the OS name
+  // user.name, then the OS user. If Houston stamped writes with the OS name
   // while `bd update --claim` used the git name, bd would refuse to let the UI
   // close beads the user claimed from the CLI.
   const humanActor = process.env.BEADS_ACTOR || gitUserName() || osUserName();
@@ -294,7 +294,7 @@ export function getConfig(): AppConfig {
 
 /**
  * The actor to close a bead as. bd refuses to close a claimed bead as anyone
- * but its assignee. Before 0.3.1 Scotty wrote as the OS user, so beads people
+ * but its assignee. Earlier versions wrote as the OS user, so beads people
  * assigned to themselves then still carry that name. It is the same person on
  * this machine, so close those as it rather than failing — #61 in reverse.
  * Every other assignee (a teammate, an agent) keeps bd's protection.

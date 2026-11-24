@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * Global launcher for Bead Me Up, Scotty.
+ * Global launcher for Houston.
  *
- * Installed as `scotty` / `bead-me-up-scotty`. Starts the Next.js production
+ * Installed as `houston-web`. Starts the Next.js production
  * server (from this package's own prebuilt .next) on a free port, waits until
  * it's ready, then opens the browser. If you run it from a directory that
  * contains a `.beads` repo, it opens straight to that project's board.
@@ -29,11 +29,10 @@ const require = createRequire(import.meta.url);
 
 function printHelp() {
   console.log(`
-Bead Me Up, Scotty — local web UI for the beads (bd or br) tracker.
+Houston — local web UI for the beads (bd or br) tracker.
 
 Usage:
-  scotty [options]
-  bead-me-up-scotty [options]
+  houston-web [options]
 
 Starts the server and opens your browser. Run it from a folder that has a
 .beads repo to jump straight to that project; otherwise you get the picker.
@@ -42,7 +41,7 @@ Options:
   -p, --port <n>   Port to use (default 3000, or $PORT). Auto-picks a free
                    port if the default is busy; with an explicit --port it
                    fails instead of moving.
-      --host <h>   Host to bind (default from Next; or $HOST).
+      --host <h>   Host to bind (default 127.0.0.1, or $HOST).
       --no-open    Don't open a browser, just print the URL.
   -h, --help       Show this help.
 `);
@@ -72,7 +71,7 @@ function parseArgs(argv) {
     const env = Number(process.env.PORT);
     opts.port = Number.isInteger(env) && env > 0 ? env : 3000;
   }
-  opts.host = opts.host || process.env.HOST || "localhost";
+  opts.host = opts.host || process.env.HOST || "127.0.0.1";
   // The host ends up in a spawn() command line (browser open) and a URL;
   // restrict it to hostname/IP characters so it can't carry shell metacharacters.
   if (!/^[A-Za-z0-9.:[\]-]+$/.test(opts.host)) {
@@ -86,25 +85,25 @@ function parseArgs(argv) {
   return opts;
 }
 
-/** Resolve true if `port` can be bound on 0.0.0.0, else false. */
-function portFree(port) {
+/** Resolve true if `port` can be bound on `host`, else false. */
+function portFree(port, host) {
   return new Promise((resolve) => {
     const srv = net.createServer();
     srv.once("error", () => resolve(false));
     srv.once("listening", () => srv.close(() => resolve(true)));
-    srv.listen({ port, host: "0.0.0.0" });
+    srv.listen({ port, host });
   });
 }
 
-/** Find a free port at/after `start`. If `explicit`, only check `start`. */
-async function pickPort(start, explicit) {
-  if (await portFree(start)) return start;
+/** Find a free port at/after `start` on `host`. If `explicit`, only check `start`. */
+async function pickPort(start, explicit, host) {
+  if (await portFree(start, host)) return start;
   if (explicit) {
     console.error(`Port ${start} is already in use. Pick another with --port.`);
     process.exit(1);
   }
   for (let p = start + 1; p <= start + 50; p++) {
-    if (await portFree(p)) return p;
+    if (await portFree(p, host)) return p;
   }
   console.error(`Could not find a free port near ${start}.`);
   process.exit(1);
@@ -228,8 +227,8 @@ async function main() {
     process.exit(1);
   }
 
-  const port = await pickPort(opts.port, opts.portExplicit);
   const host = opts.host;
+  const port = await pickPort(opts.port, opts.portExplicit, host);
   const nextBin = resolveNextBin();
 
   const child = spawn(process.execPath, [nextBin, "start", ROOT, "-p", String(port), "-H", host], {
@@ -248,6 +247,8 @@ async function main() {
   // short deadline, then escalate to SIGKILL so Ctrl+C always works.
   const FORCE_KILL_AFTER_MS = 4000;
   let shuttingDown = false;
+  let startFailed = false;
+  let ready = false;
   let forceTimer = null;
 
   const hardKill = () => {
@@ -282,21 +283,41 @@ async function main() {
   });
   child.on("exit", (code, signal) => {
     if (forceTimer) clearTimeout(forceTimer);
+    if (startFailed || (!ready && !shuttingDown)) process.exit(1);
     process.exit(signal ? 128 : (code ?? 0));
   });
 
   try {
     await waitForReady(host, port);
+    ready = true;
   } catch {
     console.error("Server failed to start. See the output above.");
-    return; // child's exit handler will set the exit code
+    startFailed = true;
+    shuttingDown = true;
+    if (child.exitCode !== null || child.signalCode !== null) {
+      process.exit(1);
+    }
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      /* already gone */
+    }
+    forceTimer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+      process.exit(1);
+    }, FORCE_KILL_AFTER_MS);
+    return;
   }
 
   const target = opts.open ? await targetPath(host, port) : "/";
   // Canonicalize through the URL parser — throws on anything that isn't a
   // well-formed http origin, so no raw user input reaches openBrowser().
   const fullUrl = new URL(target, `http://${host}:${port}`).href;
-  console.log(`\n  Bead Me Up, Scotty → ${fullUrl}\n  (Ctrl+C to stop)\n`);
+  console.log(`\n  Houston → ${fullUrl}\n  (Ctrl+C to stop)\n`);
   if (opts.open) openBrowser(fullUrl);
 }
 

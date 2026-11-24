@@ -4,7 +4,7 @@ import { usePathname } from "next/navigation";
 import { getTheme, type ThemeDef, type ThemeMode } from "@/lib/themes";
 
 /**
- * Per-project theme (bead-me-up-scotty-81k). The chosen theme is stored per-device
+ * Per-project theme. The chosen theme is stored per-device
  * in localStorage, keyed by the active project so different projects look different
  * and don't get confused. Project identity comes from the /p/<projectId> URL; the
  * launcher (no project) uses a shared key.

@@ -113,7 +113,7 @@ export interface FsResponse {
 }
 
 /**
- * An error from the scotty API that preserves the server's machine-stable
+ * An error from the Houston API that preserves the server's machine-stable
  * `code` and any raw `detail`. The plain `Error` thrown before this dropped
  * both, so the UI had nothing to key off but the message string.
  */

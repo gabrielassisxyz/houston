@@ -200,7 +200,7 @@ const pid = /pid=(\d+)/.exec(execFileSync('ss', ['-ltnpH', `sport = :${port}`], 
 assert.ok(pid, `no process listens on port ${port}`);
 const cfgHome = fs.readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').find((e) => e.startsWith('XDG_CONFIG_HOME='))?.slice(16);
 assert.ok(cfgHome && cfgHome.startsWith(os.tmpdir()), `the server uses a throwaway config directory: ${cfgHome}`);
-const serverFile = path.join(cfgHome, 'bead-me-up-scotty', 'sprints.json');
+const serverFile = path.join(cfgHome, 'houston', 'sprints.json');
 const serverStore = createSprintStore(serverFile);
 
 {
