@@ -60,8 +60,6 @@ const code = (r) => { try { return JSON.parse(r.body).code; } catch { return und
 // CSRF: a page on another site posting a "simple" text/plain body.
 let r = await send('POST', '/api/p/demo/beads', { Host: own, Origin: 'http://evil.example', 'Content-Type': 'text/plain' }, '{}');
 assert.equal(r.status, 403); assert.equal(code(r), 'cross_origin');
-r = await send('POST', '/api/update/run', { Host: own, Origin: 'http://evil.example', 'Content-Type': 'text/plain' }, '{}');
-assert.equal(r.status, 403, 'self-update must not be triggerable cross-site');
 r = await send('POST', '/api/projects', { Host: own, 'Sec-Fetch-Site': 'cross-site', ...json }, '{}');
 assert.equal(r.status, 403, 'Sec-Fetch-Site cross-site without Origin');
 r = await send('PUT', '/api/config', { Host: own, Origin: 'null', ...json }, '{}');

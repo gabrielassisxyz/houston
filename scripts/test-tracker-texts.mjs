@@ -88,9 +88,6 @@ async function openScenario(url, { liveStream = false, holdBeads = false } = {})
     const method = request.method();
     const path = new URL(request.url()).pathname;
 
-    if (path === "/api/update/check") {
-      return route.fulfill({ json: {} });
-    }
     if (method !== "GET") {
       state.nonGet.push(`${method} ${path}`);
       return route.fulfill({ status: 500, json: { error: `unexpected ${method} ${path}` } });

@@ -52,7 +52,7 @@ const sprintsCard = () => page.getByRole("button", { name: /^Sprints/ });
 const switcherItem = () => page.getByRole("menuitem", { name: "Sprints", exact: true });
 const atSprints = (url) => url.pathname === "/sprints";
 // Requests the shell makes on its own and that read no tracker.
-const shell = /\/api\/(update\/check|telemetry|viewer-mode)(\?|$)/;
+const shell = /\/api\/viewer-mode(\?|$)/;
 const stray = () => [
   ...unexpected.filter((url) => !shell.test(url)),
   ...dataFetches.filter((f) => f.from !== "/sprints" && f.from !== "/all").map((f) => `${f.url} from ${f.from}`),

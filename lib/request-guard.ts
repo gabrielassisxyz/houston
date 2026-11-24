@@ -1,8 +1,8 @@
 /**
  * Cross-site request guard for the local server (used by proxy.ts).
  *
- * Scotty listens on a predictable localhost port and can write beads, register
- * project folders and run the self-updater. Two browser attacks reach such a
+ * Scotty listens on a predictable localhost port and can write beads and
+ * register project folders. Two browser attacks reach such a
  * server from an ordinary web page:
  *
  * - Cross-site writes (CSRF): a page POSTs to http://localhost:<port>/api/...

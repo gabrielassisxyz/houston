@@ -47,7 +47,6 @@ async function answer(route) {
   const request = route.request();
   const method = request.method();
   const path = new URL(request.url()).pathname;
-  if (path === "/api/update/check") return route.fulfill({ json: {} });
   if (method === "POST" && path === STATUS_PATH) return answerStatusWrite(route, request);
   if (method !== "GET") {
     state.unexpected.push(`${method} ${path}`);

@@ -15,7 +15,7 @@ import { checkRequest } from "@/lib/request-guard";
  *    external writer (the bd CLI). Sprints are covered too (/api/sprints and
  *    everything under it): later sprint actions write labels to trackers, and a
  *    viewer who may not edit a bead may not edit a sprint. Other app-level
- *    endpoints (/api/config, /api/projects, /api/update) stay available: they
+ *    endpoints (/api/config, /api/projects) stay available: they
  *    manage this app, not the beads data. The launch flag supplies the
  *    default; a session cookie can override it for one browser. This is a
  *    local viewing preference, not access control. UI editors honor the same

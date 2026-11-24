@@ -115,8 +115,8 @@ try {
     await page.keyboard.press("Escape");
   }
 
-  // The shell's own update, telemetry and viewer-mode calls read no tracker; anything else must be a fixture.
-  const shell = /\/api\/(update\/check|telemetry|viewer-mode)(\?|$)/;
+  // The shell's own viewer-mode call reads no tracker; anything else must be a fixture.
+  const shell = /\/api\/viewer-mode(\?|$)/;
   assert.deepEqual(
     unexpected.filter((url) => !shell.test(url)),
     [],
