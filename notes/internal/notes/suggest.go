@@ -3,6 +3,8 @@ package notes
 import (
 	"sort"
 	"strings"
+
+	"github.com/gabrielassisxyz/houston/notes/internal/vault/vaultfile"
 )
 
 // ApplySuggestHunks applies the given hunks to doc as range replacements,
@@ -46,24 +48,16 @@ type SuggestHunk struct {
 }
 
 // SplitFrontmatter separates a leading YAML frontmatter block (including its
-// closing `---` line and trailing newline) from the body. When there is no
-// frontmatter, fm is "" and body is the whole input.
+// closing `---` line and trailing newline) from the body, so that fm+body is
+// always s. When there is no frontmatter, or the block is opened and never
+// closed, fm is "" and body is the whole input. A BOM before the block stays
+// with fm.
 func SplitFrontmatter(s string) (fm, body string) {
-	if !strings.HasPrefix(s, "---\n") {
+	block := vaultfile.ScanFrontmatter([]byte(s))
+	if block.State != vaultfile.ClosedBlock {
 		return "", s
 	}
-	idx := strings.Index(s[4:], "\n---")
-	if idx < 0 {
-		return "", s
-	}
-	closeStart := 4 + idx + 1 // start of the closing `---`
-	rest := s[closeStart:]
-	nl := strings.IndexByte(rest, '\n')
-	if nl < 0 {
-		return s, "" // entire input is frontmatter
-	}
-	split := closeStart + nl + 1
-	return s[:split], s[split:]
+	return s[:block.End], s[block.End:]
 }
 
 // DiffBody computes suggestion hunks for a note while protecting its

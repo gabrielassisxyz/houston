@@ -23,6 +23,7 @@ import (
 	"github.com/gabrielassisxyz/houston/notes/internal/graph"
 	"github.com/gabrielassisxyz/houston/notes/internal/graph/nodes"
 	"github.com/gabrielassisxyz/houston/notes/internal/vault/frontmatter"
+	"github.com/gabrielassisxyz/houston/notes/internal/vault/vaultfile"
 	"github.com/gabrielassisxyz/houston/notes/internal/vault/wikilink"
 	"github.com/google/uuid"
 )
@@ -1076,44 +1077,15 @@ func locateNoteFile(ctx context.Context, g *graph.Graph, vaultRoot, noteID strin
 }
 
 // extractBody returns the content after the frontmatter block.
-// If no frontmatter is present, returns the full content.
+// If no frontmatter is present, returns the full content, and so does a block
+// that is opened and never closed: the file is read as body rather than lose
+// whatever follows the stray fence.
 func extractBody(raw []byte) string {
-	// Strip BOM
-	content := raw
-	if len(content) >= 3 && content[0] == 0xEF && content[1] == 0xBB && content[2] == 0xBF {
-		content = content[3:]
-	}
-
-	// Must start with "---\n" or "---\r\n"
-	if len(content) < 4 || content[0] != '-' || content[1] != '-' || content[2] != '-' {
+	fm := vaultfile.ScanFrontmatter(raw)
+	if fm.State != vaultfile.ClosedBlock {
 		return string(raw)
 	}
-	lineEnd := 3
-	if lineEnd < len(content) && content[lineEnd] == '\r' {
-		lineEnd++
-	}
-	if lineEnd >= len(content) || content[lineEnd] != '\n' {
-		return string(raw)
-	}
-	// Find the closing "---" fence
-	start := lineEnd + 1
-	for i := start; i < len(content)-2; i++ {
-		if content[i] == '-' && content[i+1] == '-' && content[i+2] == '-' {
-			// Must be preceded by newline
-			if i > 0 && content[i-1] == '\n' {
-				// Find end of closing fence line
-				j := i + 3
-				if j < len(content) && content[j] == '\r' {
-					j++
-				}
-				if j < len(content) && content[j] == '\n' {
-					j++
-				}
-				return string(bytes.TrimLeft(content[j:], "\n\r"))
-			}
-		}
-	}
-	return string(raw)
+	return string(bytes.TrimLeft(raw[fm.End:], "\n\r"))
 }
 
 // danglingKeysFor returns the PromoteKeys for a note: stem and title.

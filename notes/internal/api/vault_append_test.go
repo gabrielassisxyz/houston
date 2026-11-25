@@ -216,3 +216,38 @@ func TestVaultAppendRejectsAnUnknownPositionNamingTheAcceptedOnes(t *testing.T) 
 		}
 	}
 }
+
+// A prepend lands under the frontmatter only if the route sees where it ends.
+// A note whose fences carry trailing spaces, or uses CRLF, or opens behind a
+// BOM, or has a line of four dashes inside its YAML, must keep its block whole
+// and its id readable.
+func TestVaultAppendToTheStartFindsEveryFenceShape(t *testing.T) {
+	const id = "019f14ca-58ad-7203-8cf8-487f765f0003"
+	cases := map[string]string{
+		"spaces after both fences":     "--- \nid: " + id + "\ntitle: Log\n---  \n\n# Log\n",
+		"four dashes inside the block": "---\nid: " + id + "\ntitle: \"a\n----\nb\"\n---\n\n# Log\n",
+		"CRLF":                         "---\r\nid: " + id + "\r\ntitle: Log\r\n---\r\n\r\n# Log\r\n",
+		"BOM":                          "\xEF\xBB\xBF---\nid: " + id + "\ntitle: Log\n---\n\n# Log\n",
+	}
+	for name, note := range cases {
+		t.Run(name, func(t *testing.T) {
+			mux, full := appendVaultWith(t, note)
+
+			w := postAppend(t, mux, "path=log.md&position=start", "## newest\n")
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+			}
+			got := readFile(t, full)
+			fm, err := frontmatter.Parse([]byte(got))
+			if err != nil {
+				t.Fatalf("prepending must leave parseable frontmatter: %v\n%q", err, got)
+			}
+			if fm.ID != id {
+				t.Fatalf("the note id must survive a prepend, got %q from:\n%q", fm.ID, got)
+			}
+			if strings.Index(got, "## newest") > strings.Index(got, "# Log") || strings.Index(got, "## newest") < strings.Index(got, "title") {
+				t.Fatalf("the block must land between the frontmatter and the body, got:\n%q", got)
+			}
+		})
+	}
+}
