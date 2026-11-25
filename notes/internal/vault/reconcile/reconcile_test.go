@@ -1456,3 +1456,45 @@ func TestOnCreate_DanglingPromotesWhenTheLinkIsAVaultPath(t *testing.T) {
 		t.Fatal("a link written as the vault-relative path must promote when that path arrives")
 	}
 }
+
+func TestHouOc517NoteFromFileFillsKindAndRefs(t *testing.T) {
+	fm, err := frontmatter.Parse([]byte("---\nid: n1\ntitle: T\nkind: Plano\ntags:\n  - b\n  - a\nrefs: [hou-4kz, STRY00000001]\n---\n\nbody\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	n := reconcile.NoteFromFile(fm, "T", "body")
+	if n.Kind != "plano" {
+		t.Errorf("Kind = %q, want plano", n.Kind)
+	}
+	if len(n.Refs) != 2 {
+		t.Fatalf("Refs = %v, want 2", n.Refs)
+	}
+	if len(n.Tags) != 2 {
+		t.Fatalf("Tags = %v, want 2", n.Tags)
+	}
+
+	// End to end: a file with kind and refs reconciles into the graph.
+	g := testutil.NewInMemoryTestGraph(t)
+	ctx := context.Background()
+	vault := newVaultDir(t)
+	rec := reconcile.New(g, vault)
+	writeFile(t, filepath.Join(vault, "kind.md"),
+		"---\nid: node-kind\ntitle: Kind\nkind: evidencia\nrefs:\n  - hou-4kz\n---\n\nBody.\n")
+	if err := rec.OnCreate(ctx, filepath.Join(vault, "kind.md")); err != nil {
+		t.Fatalf("OnCreate: %v", err)
+	}
+	var got *nodes.Note
+	if err := g.DoRead(ctx, func(tx *graph.ReadTx) error {
+		var err error
+		got, err = nodes.GetNote(ctx, tx, "node-kind")
+		return err
+	}); err != nil {
+		t.Fatalf("GetNote: %v", err)
+	}
+	if got.Kind != "evidencia" {
+		t.Errorf("Kind = %q, want evidencia", got.Kind)
+	}
+	if len(got.Refs) != 1 || got.Refs[0] != "hou-4kz" {
+		t.Errorf("Refs = %v, want [hou-4kz]", got.Refs)
+	}
+}
