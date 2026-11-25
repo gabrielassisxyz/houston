@@ -11,7 +11,7 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { useProjects } from "@/hooks/use-projects";
-import { ALL_PROJECT_ID } from "@/lib/aggregate";
+import { ALL_PROJECT_ID, WORK_PAGE_ID } from "@/lib/aggregate";
 import { FolderBrowserModal } from "@/components/folder-browser-modal";
 
 export function ProjectSwitcher({
@@ -37,9 +37,12 @@ export function ProjectSwitcher({
   const current = projects.find((p) => p.id === projectId);
   // The page over every project has no project of its own to name, and no stream state to show.
   const isAll = projectId === ALL_PROJECT_ID;
+  const isWork = projectId === WORK_PAGE_ID;
   const currentName = isAll
     ? "All projects"
-    : current?.name ?? (projectId === "demo" ? "Demo" : projectId);
+    : isWork
+      ? "Trabalho"
+      : current?.name ?? (projectId === "demo" ? "Demo" : projectId);
 
   const isDemo = kind === "demo";
   const isLive = !isDemo && !!live;
@@ -63,11 +66,19 @@ export function ProjectSwitcher({
           aria-label={`Select project, current project ${currentName}`}
           className="mb-[6px] flex w-full items-center gap-[9px] rounded-[10px] border border-border bg-[var(--surface-2)] px-[11px] py-[9px] text-left hover:bg-[var(--surface-3)] focus:outline-none"
         >
-          {!isAll && dot}
+          {!isAll && !isWork && dot}
           <div className="min-w-0 flex-1 leading-[1.15]">
             <div className="truncate text-[13px] font-[600] text-[var(--text)]">{currentName}</div>
             <div className="text-[10.5px] text-[var(--text-3)]">
-              {isAll ? "every project" : isDemo ? "sample data" : isLive ? "live" : "project"}
+              {isAll
+                ? "every project"
+                : isWork
+                  ? "painel do trabalho"
+                  : isDemo
+                    ? "sample data"
+                    : isLive
+                      ? "live"
+                      : "project"}
             </div>
           </div>
           <ChevronsUpDown size={14} className="flex-shrink-0 text-[var(--text-3)]" />

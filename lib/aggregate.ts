@@ -12,6 +12,9 @@ import type { Bead, Dependency } from "./schema";
 /** A real project id is a folder slug and cannot contain "@", so it never collides. */
 export const ALL_PROJECT_ID = "@all";
 
+/** The work dashboard page has no project of its own, like the page over every project. */
+export const WORK_PAGE_ID = "@work";
+
 export interface ProjectRef {
   id: string;
   name: string;
