@@ -142,6 +142,12 @@ function SettingsForm({ data }: { data: DoctorResponse }) {
               : `${data.message}${data.version ? ` · ${data.version}` : ""}`}
           </span>
         </div>
+        {data.project && !isDemo ? (
+          <PipelineRepoCard
+            key={`${data.project.id}|${data.project.pipelineRepo ?? ""}`}
+            project={data.project}
+          />
+        ) : null}
         <div className="text-[11.5px] text-[var(--text-3)]">
           Use the project menu on desktop or open the mobile Menu to switch projects.
         </div>
@@ -281,6 +287,58 @@ function SettingsForm({ data }: { data: DoctorResponse }) {
           Save settings
         </button>
       </div>
+    </div>
+  );
+}
+
+function PipelineRepoCard({ project }: { project: { id: string; pipelineRepo?: string } }) {
+  const qc = useQueryClient();
+  const [value, setValue] = React.useState(project.pipelineRepo ?? "");
+  const [error, setError] = React.useState<string | null>(null);
+  const save = useMutation({
+    mutationFn: () => api.projects.update(project.id, { pipelineRepo: value.trim() }),
+    onSuccess: () => {
+      setError(null);
+      qc.invalidateQueries({ queryKey: ["doctor"] });
+      qc.invalidateQueries({ queryKey: ["projects"] });
+      qc.invalidateQueries({ queryKey: ["capabilities"] });
+    },
+    onError: (e) => setError((e as Error).message),
+  });
+  const onSubmitKey = (e: React.KeyboardEvent) => {
+    if (!isSubmitKey(e)) return;
+    e.preventDefault();
+    if (!save.isPending) save.mutate();
+  };
+  return (
+    <div className="flex flex-col gap-[6px]">
+      <label className="flex flex-col gap-[6px]">
+        <span className="text-[12px] text-[var(--text-2)]">Repositório do pipeline</span>
+        <span className="flex items-center gap-2">
+          <input
+            className={`${inputClass} flex-1`}
+            value={value}
+            onChange={(e) => {
+              setValue(e.target.value);
+              setError(null);
+            }}
+            onKeyDown={onSubmitKey}
+            placeholder="org/repo-a"
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <button
+            onClick={() => {
+              if (!save.isPending) save.mutate();
+            }}
+            disabled={save.isPending}
+            className="flex h-[38px] items-center gap-[7px] rounded-[9px] border border-border bg-[var(--surface-2)] px-[13px] text-[12.5px] hover:bg-[var(--surface-3)] disabled:opacity-50"
+          >
+            Salvar
+          </button>
+        </span>
+      </label>
+      {error ? <div className="text-[12px] text-[#ef4444]">{error}</div> : null}
     </div>
   );
 }
