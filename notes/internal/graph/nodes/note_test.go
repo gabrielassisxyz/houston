@@ -307,7 +307,7 @@ func TestSoftDeleteNote_SetsTombstone(t *testing.T) {
 
 	// Soft-delete the target note
 	err = g.DoWrite(ctx, func(tx *graph.WriteTx) error {
-		return SoftDeleteNoteTx(ctx, tx, targetID, "target-note", "Target Note", Author{Name: "human"})
+		return SoftDeleteNoteTx(ctx, tx, targetID, "target-note.md", "Target Note", Author{Name: "human"})
 	})
 	if err != nil {
 		t.Fatalf("SoftDeleteNoteTx: %v", err)
@@ -414,7 +414,7 @@ func TestReviveNote_RestoresNode(t *testing.T) {
 
 	// Soft-delete
 	err = g.DoWrite(ctx, func(tx *graph.WriteTx) error {
-		return SoftDeleteNoteTx(ctx, tx, "revive-target", "revive-target", "Revive Target", Author{Name: "human"})
+		return SoftDeleteNoteTx(ctx, tx, "revive-target", "revive-target.md", "Revive Target", Author{Name: "human"})
 	})
 	if err != nil {
 		t.Fatalf("SoftDeleteNoteTx: %v", err)
@@ -661,5 +661,78 @@ func TestNotePermissionRoundtrip(t *testing.T) {
 	}
 	if got.Permission != "edit" {
 		t.Errorf("permission = %q, want %q", got.Permission, "edit")
+	}
+}
+
+// TestSoftDeleteNote_DegradesSingleNormalizedRow verifies that softDeleteNote
+// emits one normalized dangling row per degraded incoming edge, reading
+// attrs.target_text first (so [[a/foo]] stays "a/foo" instead of degrading to
+// bare "foo") and falling back to the note's normalized relative path when
+// target_text is absent.
+func TestSoftDeleteNote_DegradesSingleNormalizedRow(t *testing.T) {
+	g := testutil.NewInMemoryTestGraph(t)
+	ctx := context.Background()
+
+	err := g.DoWrite(ctx, func(tx *graph.WriteTx) error {
+		if _, err := CreateNote(ctx, tx, Note{ID: "dst-foo", Title: "Foo Title", Body: "body"}, Author{Name: "human"}); err != nil {
+			return err
+		}
+		if _, err := CreateNote(ctx, tx, Note{ID: "src-with-attrs", Title: "Src1", Body: "body"}, Author{Name: "human"}); err != nil {
+			return err
+		}
+		if _, err := CreateNote(ctx, tx, Note{ID: "src-no-attrs", Title: "Src2", Body: "body"}, Author{Name: "human"}); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO edges(id, src, dst, label, attrs) VALUES ('e-attrs','src-with-attrs','dst-foo','links_to','{"target_text":"A/Foo.md#Section","resolved_by":"stem"}')`,
+		); err != nil {
+			return err
+		}
+		_, err := tx.Exec(
+			`INSERT INTO edges(id, src, dst, label, attrs) VALUES ('e-empty','src-no-attrs','dst-foo','links_to','{}')`,
+		)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	err = g.DoWrite(ctx, func(tx *graph.WriteTx) error {
+		return SoftDeleteNoteTx(ctx, tx, "dst-foo", "A/Foo.md", "Foo Title", Author{Name: "human"})
+	})
+	if err != nil {
+		t.Fatalf("SoftDeleteNoteTx: %v", err)
+	}
+
+	err = g.DoRead(ctx, func(tx *graph.ReadTx) error {
+		for _, tc := range []struct {
+			src     string
+			wantKey string
+		}{
+			{"src-with-attrs", "a/foo"},
+			{"src-no-attrs", "a/foo"},
+		} {
+			rows, err := tx.Query(`SELECT target_key FROM dangling_links WHERE src_node_id = ?`, tc.src)
+			if err != nil {
+				return err
+			}
+			var keys []string
+			for rows.Next() {
+				var k string
+				if err := rows.Scan(&k); err != nil {
+					rows.Close()
+					return err
+				}
+				keys = append(keys, k)
+			}
+			rows.Close()
+			if len(keys) != 1 || keys[0] != tc.wantKey {
+				t.Errorf("src %q: dangling keys = %v, want [%q]", tc.src, keys, tc.wantKey)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

@@ -168,7 +168,7 @@ func finishNodeCreate(ctx context.Context, tx *graph.WriteTx, id string, attrs [
 
 	result, err := tx.Exec(
 		`INSERT INTO nodes_fts(title, attrs) VALUES (?, ?)`,
-		fts.Title, ftsAttrs,
+		stripFTSIndexMarkers(fts.Title), stripFTSIndexMarkers(ftsAttrs),
 	)
 	if err != nil {
 		return fmt.Errorf("finishNodeCreate: insert fts: %w", err)
@@ -298,7 +298,7 @@ func updateNode(ctx context.Context, tx *graph.WriteTx, spec NodeSpec, author Au
 
 		_, err = tx.Exec(
 			`INSERT INTO nodes_fts(rowid, title, attrs) VALUES (?, ?, ?)`,
-			ftsRowid.Int64, fts.Title, ftsAttrs,
+			ftsRowid.Int64, stripFTSIndexMarkers(fts.Title), stripFTSIndexMarkers(ftsAttrs),
 		)
 		if err != nil {
 			return fmt.Errorf("updateNode: insert fts: %w", err)
@@ -521,12 +521,13 @@ func deleteNode(ctx context.Context, tx *graph.WriteTx, id string, author Author
 }
 
 // softDeleteNote tombstones a note node in-place (keeps the row, sets deleted_at,
-// removes the FTS row, writes a tombstone revision, and degrades all INCOMING
-// links_to edges into dangling_links rows keyed by stem + title).
+// removes the FTS row, writes a tombstone revision, and degrades each INCOMING
+// links_to edge into one normalized dangling_links row keyed by its stored
+// target_text, falling back to the note's normalized relative path).
 //
-// Callers supply the stem (filename without extension) and title so we can key
-// the dangling rows consistently with PromoteDanglingInTx on revival.
-func softDeleteNote(ctx context.Context, tx *graph.WriteTx, id, stem, title string, author Author) error {
+// Callers supply the vault-relative path (in place of the stem) and title;
+// note_paths is forgotten by the reconciler before SoftDeleteNoteTx runs.
+func softDeleteNote(ctx context.Context, tx *graph.WriteTx, id, relPath, title string, author Author) error {
 	if !author.Valid() {
 		return graph.ErrAuthorRequired
 	}
@@ -600,19 +601,22 @@ func softDeleteNote(ctx context.Context, tx *graph.WriteTx, id, stem, title stri
 		return fmt.Errorf("softDeleteNote: insert tombstone revision %q: %w", id, err)
 	}
 
-	// Degrade incoming links_to edges into dangling_links rows
+	// Degrade incoming links_to edges into normalized dangling_links rows
 	incomingRows, err := tx.Query(
-		`SELECT id, src FROM edges WHERE dst = ? AND label = 'links_to'`,
+		`SELECT id, src, attrs FROM edges WHERE dst = ? AND label = 'links_to'`,
 		id,
 	)
 	if err != nil {
 		return fmt.Errorf("softDeleteNote: query incoming edges %q: %w", id, err)
 	}
-	type incomingEdge struct{ id, src string }
+	type incomingEdge struct {
+		id, src string
+		attrs   sql.NullString
+	}
 	var incoming []incomingEdge
 	for incomingRows.Next() {
 		var e incomingEdge
-		if err := incomingRows.Scan(&e.id, &e.src); err != nil {
+		if err := incomingRows.Scan(&e.id, &e.src, &e.attrs); err != nil {
 			incomingRows.Close()
 			return fmt.Errorf("softDeleteNote: scan incoming edge %q: %w", id, err)
 		}
@@ -623,23 +627,35 @@ func softDeleteNote(ctx context.Context, tx *graph.WriteTx, id, stem, title stri
 		return fmt.Errorf("softDeleteNote: incoming edges rows %q: %w", id, err)
 	}
 
+	fallbackKey := normalizeDanglingKey(relPath)
+	if fallbackKey == "" {
+		fallbackKey = normalizeDanglingKey(title)
+	}
+
 	for _, e := range incoming {
-		// Insert dangling row keyed by stem
-		dlStemID := ids.New()
-		if _, err := tx.Exec(
-			`INSERT INTO dangling_links(id, src_node_id, target_key, target_kind) VALUES (?, ?, ?, ?)`,
-			dlStemID, e.src, stem, "stem",
-		); err != nil {
-			return fmt.Errorf("softDeleteNote: insert dangling stem %q→%q: %w", e.src, stem, err)
+		key := ""
+		if e.attrs.Valid && e.attrs.String != "" {
+			var ea struct {
+				TargetText string `json:"target_text"`
+			}
+			if err := json.Unmarshal([]byte(e.attrs.String), &ea); err == nil {
+				key = normalizeDanglingKey(ea.TargetText)
+			}
 		}
-		// Insert dangling row keyed by title (if different from stem)
-		if title != "" && title != stem {
-			dlTitleID := ids.New()
+		if key == "" {
+			key = fallbackKey
+		}
+		if key != "" {
+			targetKind := "stem"
+			if isUUIDKey(key) {
+				targetKind = "uuid"
+			}
+			dlID := ids.New()
 			if _, err := tx.Exec(
 				`INSERT INTO dangling_links(id, src_node_id, target_key, target_kind) VALUES (?, ?, ?, ?)`,
-				dlTitleID, e.src, title, "title",
+				dlID, e.src, key, targetKind,
 			); err != nil {
-				return fmt.Errorf("softDeleteNote: insert dangling title %q→%q: %w", e.src, title, err)
+				return fmt.Errorf("softDeleteNote: insert dangling %q→%q: %w", e.src, key, err)
 			}
 		}
 		// Delete the now-degraded edge
@@ -657,6 +673,46 @@ func softDeleteNote(ctx context.Context, tx *graph.WriteTx, id, stem, title stri
 	}
 
 	return nil
+}
+
+// normalizeDanglingKey applies the same target normalization as
+// wikilink.NormalizeTarget. Package nodes cannot import vault/wikilink without
+// an import cycle (wikilink imports nodes), so this mirrors those exact rules.
+func normalizeDanglingKey(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" || strings.HasPrefix(s, "#") || strings.HasPrefix(s, "^") {
+		return ""
+	}
+	if idx := strings.IndexByte(s, '#'); idx >= 0 {
+		s = strings.TrimSpace(s[:idx])
+	}
+	if s == "" || strings.HasPrefix(s, "^") {
+		return ""
+	}
+	s = strings.ReplaceAll(s, "\\", "/")
+	s = strings.ToLower(s)
+	s = strings.TrimSuffix(s, ".md")
+	return s
+}
+
+func isUUIDKey(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < 36; i++ {
+		c := s[i]
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // reviveNote reverses a soft-delete: clears deleted_at, re-inserts the FTS row,
@@ -732,14 +788,14 @@ func reviveNote(ctx context.Context, tx *graph.WriteTx, id, stem, title string, 
 		_, _ = tx.Exec(`DELETE FROM nodes_fts WHERE rowid = ?`, ftsRowid.Int64)
 		if _, err := tx.Exec(
 			`INSERT INTO nodes_fts(rowid, title, attrs) VALUES (?, ?, ?)`,
-			ftsRowid.Int64, fts.Title, ftsAttrs,
+			ftsRowid.Int64, stripFTSIndexMarkers(fts.Title), stripFTSIndexMarkers(ftsAttrs),
 		); err != nil {
 			return fmt.Errorf("reviveNote: re-insert fts (rowid) %q: %w", id, err)
 		}
 	} else {
 		result, err := tx.Exec(
 			`INSERT INTO nodes_fts(title, attrs) VALUES (?, ?)`,
-			fts.Title, ftsAttrs,
+			stripFTSIndexMarkers(fts.Title), stripFTSIndexMarkers(ftsAttrs),
 		)
 		if err != nil {
 			return fmt.Errorf("reviveNote: insert fts %q: %w", id, err)
@@ -847,6 +903,15 @@ func diffTags(prev, next []string) (add, remove []string) {
 		}
 	}
 	return
+}
+
+// stripFTSIndexMarkers removes the snippet match markers STX and ETX from
+// text before it is written into nodes_fts, so snippet() output never carries
+// markers stored in a note's title, body or tags. The stored node keeps its
+// bytes; only the index is stripped.
+func stripFTSIndexMarkers(s string) string {
+	s = strings.ReplaceAll(s, "\x02", "")
+	return strings.ReplaceAll(s, "\x03", "")
 }
 
 // snapshotJSON marshals node state into a JSON revision diff payload.

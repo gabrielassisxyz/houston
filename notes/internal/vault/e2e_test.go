@@ -499,11 +499,11 @@ func TestE2E_AE3_DanglingLinkNoPhantomNode(t *testing.T) {
 	})
 	t.Logf("step: ae3-src is live in graph")
 
-	// Wait for dangling link to appear.
-	waitFor(t, 5*time.Second, "dangling link for Roadmap", func() bool {
-		return countDanglingByTarget(t, h.g, "Roadmap") > 0
+	// Wait for dangling link to appear (stored under the normalized lower-case key).
+	waitFor(t, 5*time.Second, "dangling link for roadmap", func() bool {
+		return countDanglingByTarget(t, h.g, "roadmap") > 0
 	})
-	t.Logf("step: dangling_links row for 'Roadmap' confirmed")
+	t.Logf("step: dangling_links row for 'roadmap' confirmed")
 
 	// Assert: NO node named "Roadmap" was created.
 	var phantomExists bool
@@ -517,8 +517,8 @@ func TestE2E_AE3_DanglingLinkNoPhantomNode(t *testing.T) {
 		t.Error("AE3: phantom 'Roadmap' node was created - should not exist")
 	}
 
-	dCount := countDanglingByTarget(t, h.g, "Roadmap")
-	t.Logf("result: AE3 PASS - dangling_links rows for 'Roadmap': %d; no phantom node created", dCount)
+	dCount := countDanglingByTarget(t, h.g, "roadmap")
+	t.Logf("result: AE3 PASS - dangling_links rows for 'roadmap': %d; no phantom node created", dCount)
 }
 
 // ---------------------------------------------------------------------------
@@ -536,8 +536,8 @@ func TestE2E_AE4_DanglingLinkPromotion(t *testing.T) {
 	waitFor(t, 5*time.Second, "ae4-src in graph", func() bool {
 		return nodeExistsByID(t, h.g, "ae4-src")
 	})
-	waitFor(t, 5*time.Second, "dangling Roadmap link exists", func() bool {
-		return countDanglingByTarget(t, h.g, "Roadmap") > 0
+	waitFor(t, 5*time.Second, "dangling roadmap link exists", func() bool {
+		return countDanglingByTarget(t, h.g, "roadmap") > 0
 	})
 	t.Logf("step: ae4-src live with dangling [[Roadmap]] link")
 
@@ -552,10 +552,10 @@ func TestE2E_AE4_DanglingLinkPromotion(t *testing.T) {
 	t.Logf("step: ae4-roadmap is live in graph")
 
 	// Poll until dangling row is gone AND edge exists.
-	waitFor(t, 5*time.Second, "dangling Roadmap row gone", func() bool {
-		return countDanglingByTarget(t, h.g, "Roadmap") == 0
+	waitFor(t, 5*time.Second, "dangling roadmap row gone", func() bool {
+		return countDanglingByTarget(t, h.g, "roadmap") == 0
 	})
-	t.Logf("step: dangling_links row for 'Roadmap' is gone (promoted)")
+	t.Logf("step: dangling_links row for 'roadmap' is gone (promoted)")
 
 	waitFor(t, 5*time.Second, "links_to edge from ae4-src to ae4-roadmap", func() bool {
 		return len(incomingLinksToEdges(t, h.g, "ae4-roadmap")) > 0
@@ -650,9 +650,9 @@ func TestE2E_AE5_DeleteTombstoneAndHistory(t *testing.T) {
 	}
 	t.Logf("step: ae5-target hidden from FTS search")
 
-	// Assert: inbound links degraded to dangling.
+	// Assert: inbound links degraded to dangling (stored under the normalized lower-case key).
 	waitFor(t, 3*time.Second, "inbound links degraded to dangling", func() bool {
-		return countDanglingByTarget(t, h.g, "AE5 Target") > 0 || countDanglingLinks(t, h.g, "ae5-linker") > 0
+		return countDanglingByTarget(t, h.g, "ae5 target") > 0
 	})
 	t.Logf("step: inbound links degraded to dangling_links rows")
 
