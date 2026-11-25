@@ -80,5 +80,12 @@ export function useUrlFilters() {
     });
   }, [updateUrl]);
 
-  return { filters, setFilters, showArchived, setShowArchived, clearFilters };
+  /** Drops the text search in place, for a view that must show something the search hides. */
+  const clearSearch = React.useCallback(() => {
+    // Held as pending too: until useSearchParams catches up, a render would still filter by the old text.
+    setPendingSearch("");
+    updateUrl((params) => params.delete("q"), "replace");
+  }, [updateUrl]);
+
+  return { filters, setFilters, showArchived, setShowArchived, clearFilters, clearSearch };
 }

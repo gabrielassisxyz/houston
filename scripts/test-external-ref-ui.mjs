@@ -1,6 +1,6 @@
-// external_ref in the interface: the drawer, the create form and the board and list search. Every
-// API request is answered from the fixtures below, the viewer mode included, so no tracker is
-// read or written and the script passes under both launch modes.
+// external_ref in the interface: the drawer, the create form, the board and list search and the
+// epic view's filter. Every API request is answered from the fixtures below, the viewer mode
+// included, so no tracker is read or written and the script passes under both launch modes.
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 
@@ -9,6 +9,9 @@ assert.ok(base, 'Set SCOTTY_TEST_URL to an isolated server started from the curr
 
 const T = '2026-09-01T00:00:00Z';
 const LABEL = 'Referência externa';
+const FILTER = 'Filtrar épicos';
+const NO_MATCH = 'Nenhum épico corresponde ao filtro.';
+const NO_EPICS = 'No epics yet. Create one with type “epic”.';
 
 const bead = (id, title, extra = {}) => ({
   id, title, description: 'Body', status: 'open', issue_type: 'task', priority: 2,
@@ -17,6 +20,10 @@ const bead = (id, title, extra = {}) => ({
 const epic = (id, title, extra = {}) => bead(id, title, { issue_type: 'epic', ...extra });
 const childOf = (id, title, parent) =>
   bead(id, title, { dependencies: [{ issue_id: id, depends_on_id: parent, type: 'parent-child' }] });
+
+// Enough epics above the jump targets that a target left unscrolled would be off screen.
+const fillers = Array.from({ length: 14 }, (_, i) =>
+  epic(`ep-f${String(i).padStart(2, '0')}`, `Filler epic ${i}`, { priority: 0 }));
 
 const projectBeads = () => [
   bead('hs-1', 'Story card', { external_ref: 'STRY00000001' }),
@@ -29,6 +36,7 @@ const projectBeads = () => [
   epic('ep-3', 'Import rework', { external_ref: 'INC00000001' }),
   epic('ep-4', 'Archive rework', { status: 'closed', priority: 4, external_ref: 'CHG00000001' }),
   epic('ep-9', 'Target rework', { priority: 4 }),
+  ...fillers,
   childOf('hs-8', 'Orphan card', 'ep-4'),
   childOf('hs-9', 'Target child card', 'ep-9'),
 ];
@@ -145,6 +153,20 @@ async function saved(id, action) {
   assert.deepEqual([write.method, write.path], ['PATCH', `/api/p/demo/beads/${id}`], `${step}: the write is an update of ${id}`);
   return write.body;
 }
+
+const shownEpics = () => page.locator('[data-epic-id]').evaluateAll((es) => es.map((e) => e.dataset.epicId));
+async function expectEpics(expected, what) {
+  const wanted = JSON.stringify([...expected].sort());
+  let last;
+  await eventually(async () => {
+    last = JSON.stringify((await shownEpics()).sort());
+    return last === wanted;
+  }, `${what}: expected ${wanted}`);
+}
+const epicFilter = () => page.getByRole('textbox', { name: FILTER, exact: true });
+const epicsHeader = () => page.locator('header').filter({ has: page.getByRole('heading', { name: 'Epics', exact: true }) });
+const epicCount = () => epicsHeader().locator('span').first().innerText();
+const param = (name) => new URL(page.url()).searchParams.get(name);
 
 try {
   // ── Drawer, read mode ──────────────────────────────────────────────────────
@@ -298,9 +320,133 @@ try {
     assert.deepEqual([...new Set(ids)], ['hs-1'], `the ${view} shows only the bead carrying the reference`);
   }
 
+  // ── Epic view filter ───────────────────────────────────────────────────────
+  step = 'epic filter on a project page';
+  await open('/p/demo?view=epics&custom=keep');
+  const allEpics = projectBeads().filter((b) => b.issue_type === 'epic').map((b) => b.id);
+  const openEpics = allEpics.filter((id) => id !== 'ep-4');
+  const total = allEpics.length;
+  await expectEpics(openEpics, 'no filter');
+  await page.keyboard.press('/');
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), FILTER, '/ focuses the epic filter');
+  assert.equal(await epicFilter().inputValue(), '', 'the shortcut key is not typed into it');
+  await page.keyboard.type('stry00000555');
+  await expectEpics(['ep-2'], 'by reference');
+  assert.equal(param('q'), 'stry00000555', 'the filter is the URL’s q');
+  assert.equal(param('custom'), 'keep', 'other parameters stay');
+  assert.match(await epicCount(), new RegExp(`^1 of ${total} epics`), 'the header counts what the filter left');
+  await epicFilter().fill('billing');
+  await expectEpics(['ep-1'], 'by title');
+  await epicFilter().fill('EP-3');
+  await expectEpics(['ep-3'], 'by id');
+  await epicFilter().fill('INC00000001');
+  await expectEpics(['ep-3'], 'by another reference');
+
+  step = 'no match';
+  await epicFilter().fill('CHG00000001');
+  await page.getByText(NO_MATCH, { exact: true }).waitFor();
+  assert.equal(await page.getByText(NO_EPICS, { exact: true }).count(), 0, 'a filter with no match does not claim there are no epics');
+  await page.getByRole('button', { name: 'Show Closed', exact: true }).click();
+  await expectEpics(['ep-4'], 'a closed epic by reference, with closed ones shown');
+  assert.match(await epicCount(), new RegExp(`^1 of ${total} epics`), 'the count shows although nothing hides closed epics');
+  await epicFilter().fill('');
+  await expectEpics(allEpics, 'filter emptied');
+  assert.match(await epicCount(), new RegExp(`^${total} epics`), 'an unfiltered list has no "of" count');
+  assert.equal(param('q'), null, 'an emptied filter leaves no q');
+  assert.equal(await page.getByText(NO_MATCH, { exact: true }).count(), 0);
+
+  step = 'bookmarked filter';
+  await open('/p/demo?view=epics&q=STRY00000555');
+  await expectEpics(['ep-2'], 'from the URL');
+  assert.equal(await epicFilter().inputValue(), 'STRY00000555', 'the input shows the URL’s q');
+
+  step = 'no epics at all';
+  await open('/p/demo?view=epics', { beads: [bead('hs-1', 'Story card')] });
+  await page.getByText(NO_EPICS, { exact: true }).waitFor();
+  assert.equal(await page.getByText(NO_MATCH, { exact: true }).count(), 0, 'an empty filter keeps the old empty state');
+
+  step = 'epic filter on /all';
+  await open('/all?view=epics');
+  await expectEpics(openEpics.map((id) => `alpha:${id}`), 'no filter');
+  await epicFilter().fill('STRY00000555');
+  await expectEpics(['alpha:ep-2'], 'by reference');
+  await epicFilter().fill('ep-3');
+  await expectEpics(['alpha:ep-3'], 'by the id shown');
+  await epicFilter().fill('alpha:');
+  await page.getByText(NO_MATCH, { exact: true }).waitFor();
+
+  // ── Jumping from the list to an epic ───────────────────────────────────────
+  async function jump(path, { search, parentTitle, epicId }) {
+    await open(`${path}${path.includes('?') ? '&' : '?'}view=list&custom=keep&q=${encodeURIComponent(search)}`);
+    const chip = page.getByTitle(parentTitle, { exact: true });
+    await chip.waitFor();
+    // A target that leaves the page for one render and comes back ends up looking right.
+    await page.evaluate((id) => {
+      window.__removed = 0;
+      const selector = `[data-epic-id="${id}"]`;
+      new MutationObserver((records) => {
+        for (const node of records.flatMap((r) => [...r.removedNodes])) {
+          if (node instanceof Element && (node.matches(selector) || node.querySelector(selector))) window.__removed += 1;
+        }
+      }).observe(document.body, { childList: true, subtree: true });
+    }, epicId);
+    const entries = await page.evaluate(() => history.length);
+    await chip.click();
+    await page.getByRole('heading', { name: 'Epics', exact: true }).waitFor();
+    // Past the focus frame, the smooth scroll and the 1.6 s flash.
+    await page.waitForTimeout(2200);
+    const section = page.locator(`[data-epic-id="${epicId}"]`);
+    assert.equal(await section.count(), 1, `${step}: the epic is shown once the focus has settled`);
+    assert.equal(await section.getByRole('button').first().getAttribute('aria-expanded'), 'true', `${step}: and expanded`);
+    assert.equal(await page.evaluate(() => window.__removed), 0, `${step}: and never left the page on the way`);
+    assert.equal(await page.evaluate(() => history.length), entries + 1, `${step}: the jump adds the view's history entry and no other`);
+    assert.equal(param('view'), 'epics');
+    assert.equal(param('custom'), 'keep', `${step}: other parameters stay`);
+    const box = await section.boundingBox();
+    assert.ok(box.y >= 0 && box.y < page.viewportSize().height - 40, `${step}: the epic is on screen (top at ${box.y})`);
+  }
+
+  for (const target of [
+    { path: '/p/demo', search: 'child card', parentTitle: 'ep-9 · Target rework · P4', epicId: 'ep-9' },
+    { path: '/p/demo', search: 'Orphan', parentTitle: 'ep-4 · Archive rework · P4', epicId: 'ep-4' },
+    { path: '/all', search: 'child card', parentTitle: 'ep-9 · Target rework · P4', epicId: 'alpha:ep-9' },
+  ]) {
+    step = `jump to ${target.epicId} while the filter excludes it`;
+    await jump(target.path, target);
+    assert.equal(param('q'), null, `${step}: the filter is cleared`);
+    assert.equal(await epicFilter().inputValue(), '', `${step}: and so is the input`);
+    assert.ok((await shownEpics()).length >= openEpics.length, `${step}: the other epics are back`);
+    await page.goBack();
+    await page.getByRole('heading', { name: 'List', exact: true }).waitFor();
+    assert.equal(param('q'), target.search, `${step}: Back returns to the filtered list`);
+  }
+
+  step = 'jump while the filter matches the epic';
+  await jump('/p/demo', { search: 'Target', parentTitle: 'ep-9 · Target rework · P4', epicId: 'ep-9' });
+  assert.equal(param('q'), 'Target', 'a filter that matches the epic is kept');
+  await expectEpics(['ep-9'], 'still filtered');
+
+  // ── Narrow screen ──────────────────────────────────────────────────────────
+  for (const url of ['/p/demo?view=epics&q=rework', '/all?view=epics&q=rework']) {
+    step = `390 pixels: ${url}`;
+    await open(url, { viewport: { width: 390, height: 844 } });
+    await epicFilter().waitFor();
+    await eventually(async () => (await epicCount()).includes(' of '), 'the epics are listed');
+    const overflow = await epicsHeader().evaluate((header) => ({
+      scroll: header.scrollWidth - header.clientWidth,
+      outside: [...header.querySelectorAll('*')]
+        .map((e) => e.getBoundingClientRect())
+        .filter((r) => r.width > 0 && (r.left < -0.5 || r.right > window.innerWidth + 0.5)).length,
+    }));
+    assert.deepEqual(overflow, { scroll: 0, outside: 0 }, `${step}: the header does not overflow`);
+    // Without wrapping nothing overflows either: the filter is squeezed beside the buttons instead.
+    const { width } = await epicFilter().locator('xpath=..').boundingBox();
+    assert.ok(width >= 200, `${step}: the header wraps and the filter keeps its width (${width})`);
+  }
+
   assert.deepEqual(unrouted, [], 'every request had a fixture');
   assert.deepEqual(errors, [], 'no page error');
-  console.log('PASS external_ref UI: drawer, create form and board and list search');
+  console.log('PASS external_ref UI: drawer, create form, board and list search, epic filter and jump, narrow header and shortcuts');
 } catch (error) {
   // First, and on one line: it is what scripts/mutate-check.py reports as the reason.
   console.error(`Error at step "${step}": ${error.message.split('\n')[0]}`);

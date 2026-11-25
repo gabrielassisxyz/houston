@@ -4,6 +4,8 @@ import { Icon, typeIconName } from "@/components/icons";
 import { OriginBadge, PriorityChip } from "@/components/board/bead-card";
 import { useApp } from "@/components/app-context";
 import { ProjectChip } from "@/components/project-chip";
+import { useUrlFilters } from "@/hooks/use-url-filters";
+import type { Bead } from "@/lib/schema";
 import { displayId } from "@/lib/aggregate";
 import { beadOrigin, originTitle } from "@/lib/attribution";
 import {
@@ -45,6 +47,15 @@ function LabelChips({ labels, max }: { labels: string[]; max: number }) {
   );
 }
 
+/** This view's text filter: an epic is found by the id it shows, its title or its reference. */
+function matchesEpicSearch(epic: Bead, search: string): boolean {
+  const q = search.trim().toLowerCase();
+  return (
+    !q ||
+    [displayId(epic), epic.title, epic.external_ref ?? ""].some((v) => v.toLowerCase().includes(q))
+  );
+}
+
 export function EpicsView({
   focusEpic,
   onFocusHandledAction,
@@ -63,6 +74,10 @@ export function EpicsView({
   } = useApp();
   const [expanded, setExpanded] = React.useState<Record<string, boolean>>({});
   const [hideClosed, setHideClosed] = React.useState(true);
+  // The URL's `q`, shared with the Board and List search. Their facet filters do not apply here.
+  const { filters, setFilters, clearSearch } = useUrlFilters();
+  const search = filters.search;
+  const scrollAfterClear = React.useRef<HTMLElement | null>(null);
   const flashedElement = React.useRef<HTMLElement | null>(null);
   const focusFrame = React.useRef<number | null>(null);
   const flashTimeout = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -79,10 +94,13 @@ export function EpicsView({
     );
   // "Filter out closed" (bead 8vm): hide closed epics (and closed children below).
   // Progress % still counts all children, so it stays accurate. A newly focused
-  // closed epic is included for the first render; the focus effect then turns
-  // this filter off so the control accurately reflects what is visible.
+  // epic is included for the first render even when closed or outside the text
+  // filter; the focus effect then turns off whatever hides it, so the controls
+  // accurately reflect what is visible.
   const epics = allEpics.filter(
-    (e) => !hideClosed || e.status !== "closed" || e.id === focusEpic?.id,
+    (e) =>
+      e.id === focusEpic?.id ||
+      ((!hideClosed || e.status !== "closed") && matchesEpicSearch(e, search)),
   );
 
   // Consume each focus request after scrolling. Keeping a handled request in
@@ -94,9 +112,14 @@ export function EpicsView({
     if (!el) return;
 
     const focusedEpic = beads.find((bead) => bead.id === focusEpic.id);
+    const searchHidesIt = !!focusedEpic && !matchesEpicSearch(focusedEpic, search);
     if (focusFrame.current !== null) cancelAnimationFrame(focusFrame.current);
     focusFrame.current = requestAnimationFrame(() => {
       if (focusedEpic?.status === "closed") setHideClosed(false);
+      if (searchHidesIt) {
+        scrollAfterClear.current = el;
+        clearSearch();
+      }
       setExpanded((state) => ({ ...state, [focusEpic.id]: true }));
       onFocusHandledAction?.();
       focusFrame.current = null;
@@ -112,7 +135,15 @@ export function EpicsView({
       flashedElement.current = null;
       flashTimeout.current = null;
     }, 1600);
-  }, [beads, focusEpic, onFocusHandledAction]);
+  }, [beads, focusEpic, onFocusHandledAction, search, clearSearch]);
+
+  // Clearing the text filter brings back the epics above the focused one, which
+  // pushes it away from where the first scroll was aimed.
+  React.useEffect(() => {
+    if (search || !scrollAfterClear.current) return;
+    scrollAfterClear.current.scrollIntoView({ behavior: "smooth", block: "start" });
+    scrollAfterClear.current = null;
+  }, [search]);
 
   React.useEffect(
     () => () => {
@@ -125,15 +156,30 @@ export function EpicsView({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <header className="flex flex-shrink-0 items-center gap-3 border-b border-border bg-[var(--surface)] p-[14px_22px]">
+      <header className="flex flex-shrink-0 flex-wrap items-center gap-3 border-b border-border bg-[var(--surface)] p-[14px_22px]">
         <div className="flex-1">
           <h1 className="m-0 text-base font-[650] tracking-[-.01em]">Epics</h1>
           <span className="text-[11.5px] text-[var(--text-3)]">
             {epics.length}
-            {hideClosed && allEpics.length !== epics.length ? ` of ${allEpics.length}` : ""} epics ·
+            {allEpics.length !== epics.length ? ` of ${allEpics.length}` : ""} epics ·
             progress = closed ÷ children
           </span>
         </div>
+        <label className="flex h-9 w-[220px] max-w-full cursor-text items-center gap-[7px] rounded-[9px] border border-border bg-[var(--surface-2)] px-[11px] focus-within:border-[var(--brand)]">
+          <Icon
+            name="search"
+            size={15}
+            className={`flex-shrink-0 ${search.trim() ? "text-[var(--brand)]" : "text-[var(--text-3)]"}`}
+          />
+          <input
+            data-search
+            aria-label="Filtrar épicos"
+            placeholder="Filtrar épicos"
+            value={search}
+            onChange={(e) => setFilters({ ...filters, search: e.target.value })}
+            className="w-full min-w-0 border-none bg-transparent text-[13px] text-[var(--text)] outline-none"
+          />
+        </label>
         <button
           onClick={() => setHideClosed((v) => !v)}
           title={hideClosed ? "Show closed epics and children" : "Hide closed epics and children"}
@@ -348,7 +394,9 @@ export function EpicsView({
           })}
           {epics.length === 0 && (
             <div className="rounded-[14px] border border-dashed border-border p-10 text-center text-[13px] text-[var(--text-3)]">
-              No epics yet. Create one with type “epic”.
+              {search.trim()
+                ? "Nenhum épico corresponde ao filtro."
+                : "No epics yet. Create one with type “epic”."}
             </div>
           )}
         </div>
