@@ -5,6 +5,7 @@ import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { checkWorkDashboardUrl } from "./loopback-url";
+import { checkGithubOrgs, checkServiceNowHost, checkSnapshotPath } from "./config-values";
 
 /**
  * Local app config (NOT stored in beads). Lives as a small JSON file under the
@@ -47,15 +48,37 @@ export interface AppConfig {
    * never stored or returned.
    */
   workDashboardUrl?: string;
+  /**
+   * Path of the snapshot file a local collector writes on the work machine.
+   * Absent when unset; `null` is never stored or returned.
+   */
+  snapshotPath?: string;
+  /**
+   * Bare host name of the ticket instance links may point at. Absent when
+   * unset; `null` is never stored or returned.
+   */
+  serviceNowHost?: string;
+  /**
+   * Lowercase GitHub owner names pipeline links may be built for. Absent
+   * when unset; `null` is never stored or returned. An empty list is stored.
+   */
+  githubOrgs?: string[];
 }
 
-/** Patch type for `saveConfig`: `workDashboardUrl` is `string | null`. */
+/**
+ * Patch type for `saveConfig`: `workDashboardUrl`, `snapshotPath` and
+ * `serviceNowHost` are `string | null`, `githubOrgs` is `string[] | null`,
+ * with `null` removing the key.
+ */
 export interface SaveConfigPatch {
   humanActor?: string;
   humanAllowlist?: string[];
   pollIntervalMs?: number;
   gamification?: boolean;
   workDashboardUrl?: string | null;
+  snapshotPath?: string | null;
+  serviceNowHost?: string | null;
+  githubOrgs?: string[] | null;
 }
 
 /**
@@ -322,6 +345,33 @@ export function getConfig(): AppConfig {
     }
   }
 
+  if (onDisk && (onDisk as Partial<AppConfig>).snapshotPath !== undefined) {
+    const checked = checkSnapshotPath((onDisk as Partial<AppConfig>).snapshotPath);
+    if (checked.ok) {
+      merged.snapshotPath = checked.value;
+    } else {
+      console.warn(`[houston] config: snapshotPath ignored: ${checked.reason}`);
+    }
+  }
+
+  if (onDisk && (onDisk as Partial<AppConfig>).serviceNowHost !== undefined) {
+    const checked = checkServiceNowHost((onDisk as Partial<AppConfig>).serviceNowHost);
+    if (checked.ok) {
+      merged.serviceNowHost = checked.value;
+    } else {
+      console.warn(`[houston] config: serviceNowHost ignored: ${checked.reason}`);
+    }
+  }
+
+  if (onDisk && (onDisk as Partial<AppConfig>).githubOrgs !== undefined) {
+    const checked = checkGithubOrgs((onDisk as Partial<AppConfig>).githubOrgs);
+    if (checked.ok) {
+      merged.githubOrgs = checked.value;
+    } else {
+      console.warn(`[houston] config: githubOrgs ignored: ${checked.reason}`);
+    }
+  }
+
   // One-time migration: back-fill the registry from the legacy single repoPath
   // (or BEADS_REPO / cwd) when no projects array exists yet.
   let migrated = false;
@@ -355,7 +405,7 @@ export function closeActor(assignee: string | null | undefined): string {
   return assignee && assignee !== humanActor && assignee === osUserName() ? assignee : humanActor;
 }
 
-/** Update global settings (actor / allowlist / poll / dashboard). Project registry has its own mutators. */
+/** Update global settings (actor / allowlist / poll / dashboard / chain). Project registry has its own mutators. */
 export function saveConfig(patch: SaveConfigPatch): AppConfig {
   const current = getConfig();
   let normalisedUrl: string | undefined;
@@ -365,6 +415,30 @@ export function saveConfig(patch: SaveConfigPatch): AppConfig {
       throw new ConfigError(checked.reason, "invalid_config");
     }
     normalisedUrl = checked.url;
+  }
+  let normalisedSnapshot: string | undefined;
+  if (patch.snapshotPath !== undefined && patch.snapshotPath !== null) {
+    const checked = checkSnapshotPath(patch.snapshotPath);
+    if (!checked.ok) {
+      throw new ConfigError(checked.reason, "invalid_config");
+    }
+    normalisedSnapshot = checked.value;
+  }
+  let normalisedHost: string | undefined;
+  if (patch.serviceNowHost !== undefined && patch.serviceNowHost !== null) {
+    const checked = checkServiceNowHost(patch.serviceNowHost);
+    if (!checked.ok) {
+      throw new ConfigError(checked.reason, "invalid_config");
+    }
+    normalisedHost = checked.value;
+  }
+  let normalisedOrgs: string[] | undefined;
+  if (patch.githubOrgs !== undefined && patch.githubOrgs !== null) {
+    const checked = checkGithubOrgs(patch.githubOrgs);
+    if (!checked.ok) {
+      throw new ConfigError(checked.reason, "invalid_config");
+    }
+    normalisedOrgs = checked.value;
   }
   const next: AppConfig = { ...current };
   if (patch.humanActor !== undefined) next.humanActor = patch.humanActor;
@@ -378,9 +452,35 @@ export function saveConfig(patch: SaveConfigPatch): AppConfig {
       next.workDashboardUrl = normalisedUrl as string;
     }
   }
+  if (patch.snapshotPath !== undefined) {
+    if (patch.snapshotPath === null) {
+      delete next.snapshotPath;
+    } else {
+      next.snapshotPath = normalisedSnapshot as string;
+    }
+  }
+  if (patch.serviceNowHost !== undefined) {
+    if (patch.serviceNowHost === null) {
+      delete next.serviceNowHost;
+    } else {
+      next.serviceNowHost = normalisedHost as string;
+    }
+  }
+  if (patch.githubOrgs !== undefined) {
+    if (patch.githubOrgs === null) {
+      delete next.githubOrgs;
+    } else {
+      next.githubOrgs = normalisedOrgs as string[];
+    }
+  }
   if (patch.humanActor !== undefined) next.humanActorChosen = true;
-  if (patch.workDashboardUrl === null) {
-    persist(next, ["workDashboardUrl"]);
+  const deleteKeys: string[] = [];
+  if (patch.workDashboardUrl === null) deleteKeys.push("workDashboardUrl");
+  if (patch.snapshotPath === null) deleteKeys.push("snapshotPath");
+  if (patch.serviceNowHost === null) deleteKeys.push("serviceNowHost");
+  if (patch.githubOrgs === null) deleteKeys.push("githubOrgs");
+  if (deleteKeys.length > 0) {
+    persist(next, deleteKeys);
   } else {
     persist(next);
   }

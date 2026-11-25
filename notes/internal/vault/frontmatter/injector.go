@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/gabrielassisxyz/houston/notes/internal/vault/vaultfile"
 )
 
 // InjectID surgically inserts an `id: <uuid>` line into a file's frontmatter
@@ -15,7 +17,9 @@ import (
 // Behavior:
 //   - If frontmatter exists and has no `id` line: inserts `id: <uuid>` immediately
 //     after the opening "---\n" fence, preserving all other bytes.
-//   - If frontmatter exists and already has an `id` line: returns original bytes unchanged.
+//   - If frontmatter exists and already has an id: returns original bytes unchanged.
+//   - If frontmatter has a top-level `id` line whose value reads as empty: that
+//     line becomes `id: <uuid>`, keeping its line ending.
 //   - If no frontmatter block exists: prepends a minimal `---\nid: <uuid>\n---\n` block.
 //   - Preserves BOM, line endings (LF/CRLF), comments, blank lines, and key order.
 func InjectID(raw []byte, uuid string) ([]byte, error) {
@@ -33,62 +37,89 @@ func InjectID(raw []byte, uuid string) ([]byte, error) {
 		return bytes.Clone(raw), nil
 	}
 
-	// Determine BOM prefix
-	var bom []byte
-	content := raw
-	if len(content) >= 3 && content[0] == 0xEF && content[1] == 0xBB && content[2] == 0xBF {
-		bom = content[:3]
-		content = content[3:]
+	bom, content := splitBOM(raw)
+	block := vaultfile.ScanFrontmatter(raw)
+	switch block.State {
+	case vaultfile.NoBlock:
+		return validateInjectedID(prependBlock(bom, content, uuid), uuid)
+	case vaultfile.UnclosedBlock:
+		// Parse refuses an unclosed block, so this is never reached; prepending
+		// a block above one would bury the user's YAML in the body.
+		return nil, fmt.Errorf("frontmatter: cannot inject into an unterminated block")
 	}
 
-	// Check if frontmatter block exists
-	if len(content) < 4 || content[0] != '-' || content[1] != '-' || content[2] != '-' {
-		// No frontmatter block - prepend minimal block
-		return prependBlock(bom, content, uuid), nil
-
+	// The block can already hold an id key that the YAML reads as empty:
+	// "id:", "id: null", "id: ~", "id: # note" and their kin. Adding a second
+	// one would make the block fail to parse (mapping key "id" already
+	// defined), and leaving the file as it is gives it no id, so every pass
+	// would mint a new one and write the note again. The empty line takes the
+	// id instead, keeping its line ending.
+	if start, end, found := findTopLevelIDLine(raw, block.Start, block.Close); found {
+		var buf bytes.Buffer
+		buf.Write(raw[:start])
+		buf.WriteString("id: " + uuid)
+		buf.Write(raw[end:])
+		return validateInjectedID(buf.Bytes(), uuid)
 	}
 
-	// After "---" we expect newline
-	lineEnd := 3
-	if lineEnd < len(content) && content[lineEnd] == '\r' {
-		lineEnd++
-	}
-	if lineEnd >= len(content) || content[lineEnd] != '\n' {
-		// "---" not followed by newline - treat as no block
-		return prependBlock(bom, content, uuid), nil
-	}
-
-	// Determine the newline sequence used in the file.
-	nl := determineNewline(content)
-
-	// Insert `id: <uuid>` right after the opening "---\n" or "---\r\n"
-	insertPos := len(bom) + lineEnd + 1 // after "---" + newline
-
-	// Check if id already exists in the frontmatter block to avoid double-insertion
-	blockEnd := -1
-	for i := insertPos; i < len(raw); i++ {
-		if raw[i] == '-' && i+2 < len(raw) && raw[i+1] == '-' && raw[i+2] == '-' {
-			if i > 0 && (raw[i-1] == '\n' || (raw[i-1] == '\r' && i > 1 && raw[i-2] == '\n')) {
-				blockEnd = i
-				break
-			}
-		}
-	}
-
-	if blockEnd > insertPos {
-		blockContent := string(raw[insertPos:blockEnd])
-		if strings.Contains(blockContent, "\nid:") || strings.Contains(blockContent, "\r\nid:") || strings.HasPrefix(blockContent, "id:") {
-			return bytes.Clone(raw), nil
-		}
-	}
-
+	// Insert `id: <uuid>` right after the opening fence line.
 	var buf bytes.Buffer
-	buf.Write(raw[:insertPos])
+	buf.Write(raw[:block.Start])
 	buf.WriteString("id: " + uuid)
-	buf.WriteString(nl)
-	buf.Write(raw[insertPos:])
+	buf.WriteString(determineNewline(content))
+	buf.Write(raw[block.Start:])
+	return validateInjectedID(buf.Bytes(), uuid)
+}
 
-	return buf.Bytes(), nil
+// findTopLevelIDLine locates, within raw[from:to], a line at column 0 holding
+// the key id, bare or quoted, and returns that line's span without its line
+// ending. An indented id belongs to a nested mapping and is not the note's.
+func findTopLevelIDLine(raw []byte, from, to int) (start, end int, found bool) {
+	for pos := from; pos < to; {
+		lineEnd := lineEndAt(raw, pos, to)
+		line := bytes.TrimRight(raw[pos:lineEnd], "\r")
+		if isIDKeyLine(line) {
+			return pos, pos + len(line), true
+		}
+		pos = lineEnd
+		if pos < to {
+			pos++
+		}
+	}
+	return 0, 0, false
+}
+
+// isIDKeyLine reports whether line opens a mapping entry whose key is id:
+// the key, optional blanks, a colon, then a blank or the end of the line.
+func isIDKeyLine(line []byte) bool {
+	var rest []byte
+	switch {
+	case bytes.HasPrefix(line, []byte("id")):
+		rest = line[2:]
+	case bytes.HasPrefix(line, []byte(`"id"`)), bytes.HasPrefix(line, []byte("'id'")):
+		rest = line[4:]
+	default:
+		return false
+	}
+	rest = bytes.TrimLeft(rest, " \t")
+	if len(rest) == 0 || rest[0] != ':' {
+		return false
+	}
+	return len(rest) == 1 || rest[1] == ' ' || rest[1] == '\t'
+}
+
+// validateInjectedID re-reads InjectID's own output and refuses it unless it
+// parses and carries the id it was asked to write. A note it would corrupt is
+// left alone and the caller told, rather than written and found later.
+func validateInjectedID(result []byte, uuid string) ([]byte, error) {
+	fm, err := Parse(result)
+	if err != nil {
+		return nil, fmt.Errorf("frontmatter: InjectID produced unparseable YAML: %w", err)
+	}
+	if fm.ID != uuid {
+		return nil, fmt.Errorf("frontmatter: InjectID wrote id %q but reads back %q", uuid, fm.ID)
+	}
+	return result, nil
 }
 
 // prependBlock creates a minimal frontmatter block with just the id.
@@ -127,14 +158,10 @@ func InjectTags(raw []byte, tags []string) ([]byte, error) {
 		return nil, fmt.Errorf("frontmatter: cannot inject into malformed YAML: %w", err)
 	}
 
-	var bom []byte
-	content := raw
-	if len(content) >= 3 && content[0] == 0xEF && content[1] == 0xBB && content[2] == 0xBF {
-		bom = content[:3]
-		content = content[3:]
-	}
-
-	if len(content) < 4 || content[0] != '-' || content[1] != '-' || content[2] != '-' {
+	bom, content := splitBOM(raw)
+	block := vaultfile.ScanFrontmatter(raw)
+	switch block.State {
+	case vaultfile.NoBlock:
 		if len(tags) == 0 {
 			return bytes.Clone(raw), nil
 		}
@@ -143,41 +170,15 @@ func InjectTags(raw []byte, tags []string) ([]byte, error) {
 			return nil, err
 		}
 		return validateInjectedTags(result, tags)
-	}
-
-	lineEnd := 3
-	if lineEnd < len(content) && content[lineEnd] == '\r' {
-		lineEnd++
-	}
-	if lineEnd >= len(content) || content[lineEnd] != '\n' {
-		if len(tags) == 0 {
-			return bytes.Clone(raw), nil
-		}
-		result, err := prependTagsBlock(bom, content, tags)
-		if err != nil {
-			return nil, err
-		}
-		return validateInjectedTags(result, tags)
-	}
-
-	nl := determineNewline(content)
-	insertPos := len(bom) + lineEnd + 1
-
-	blockEnd := -1
-	for i := insertPos; i < len(raw); i++ {
-		if raw[i] == '-' && i+2 < len(raw) && raw[i+1] == '-' && raw[i+2] == '-' {
-			if i > 0 && (raw[i-1] == '\n' || (raw[i-1] == '\r' && i > 1 && raw[i-2] == '\n')) {
-				blockEnd = i
-				break
-			}
-		}
-	}
-	if blockEnd < insertPos {
+	case vaultfile.UnclosedBlock:
 		// Unterminated block - leave the bytes alone rather than guess.
 		return bytes.Clone(raw), nil
 	}
 
-	start, end, found := findTagsSpan(raw, insertPos, blockEnd)
+	nl := determineNewline(content)
+	blockEnd := block.Close
+
+	start, end, found := findTagsSpan(raw, block.Start, blockEnd)
 
 	if found {
 		var buf bytes.Buffer
@@ -331,6 +332,15 @@ func prependTagsBlock(bom, content []byte, tags []string) ([]byte, error) {
 	buf.WriteString("---" + nl)
 	buf.Write(content)
 	return buf.Bytes(), nil
+}
+
+// splitBOM separates a leading UTF-8 BOM from the rest of raw, so a block
+// prepended to a file goes after the BOM rather than before it.
+func splitBOM(raw []byte) (bom, content []byte) {
+	if len(raw) >= 3 && raw[0] == 0xEF && raw[1] == 0xBB && raw[2] == 0xBF {
+		return raw[:3], raw[3:]
+	}
+	return nil, raw
 }
 
 // determineNewline probes the first 1024 bytes for CRLF anywhere, defaulting to LF.

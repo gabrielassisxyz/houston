@@ -4,6 +4,7 @@ import { api } from "@/lib/api-client";
 
 export interface Capabilities {
   workDashboardUrl: string | undefined;
+  chain: boolean;
 }
 
 /**
@@ -23,8 +24,9 @@ export function useCapabilities() {
     queryFn: async ({ signal }): Promise<Capabilities> => {
       const body = await api.capabilities(signal);
       const raw = (body as { workDashboardUrl?: unknown } | null)?.workDashboardUrl;
-      if (typeof raw === "string" && raw.trim() !== "") return { workDashboardUrl: raw.trim() };
-      return { workDashboardUrl: undefined };
+      const chain = (body as { chain?: unknown } | null)?.chain === true;
+      if (typeof raw === "string" && raw.trim() !== "") return { workDashboardUrl: raw.trim(), chain };
+      return { workDashboardUrl: undefined, chain };
     },
     retry: false,
   });
