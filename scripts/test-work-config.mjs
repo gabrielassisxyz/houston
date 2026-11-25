@@ -294,4 +294,39 @@ const call = async (method, url, body) => {
     await call('PUT', '/api/config', { pollIntervalMs: initialPoll });
   }
 }
-console.log('PASS (server): config route accepts, refuses and clears workDashboardUrl');
+
+{
+  const cap = async (cookie) => {
+    const res = await fetch(`${base}/api/capabilities`, { headers: cookie ? { Cookie: cookie } : undefined });
+    return { status: res.status, body: await res.json(), cache: res.headers.get('cache-control') ?? '' };
+  };
+  try {
+    await call('PUT', '/api/config', { workDashboardUrl: null });
+    let got = await cap();
+    assert.equal(got.status, 200);
+    assert.ok(got.cache.includes('no-store'), `capabilities answers no-store, got ${got.cache}`);
+    assert.deepEqual(got.body, { workDashboardUrl: null }, 'capabilities is null before the key is set');
+
+    const put = await call('PUT', '/api/config', { workDashboardUrl: VALID_BARE });
+    assert.equal(put.status, 200);
+    got = await cap();
+    assert.equal(got.status, 200);
+    assert.ok(got.cache.includes('no-store'), `capabilities answers no-store, got ${got.cache}`);
+    assert.deepEqual(got.body, { workDashboardUrl: VALID }, 'capabilities carries the normalised url after set');
+
+    got = await cap('scotty-viewer-mode=read-only');
+    assert.equal(got.status, 200, 'capabilities stays 200 in viewer mode');
+    assert.ok(got.cache.includes('no-store'), `capabilities answers no-store in viewer mode, got ${got.cache}`);
+    assert.deepEqual(got.body, { workDashboardUrl: VALID }, 'capabilities keeps the url in viewer mode');
+
+    const cleared = await call('PUT', '/api/config', { workDashboardUrl: '' });
+    assert.equal(cleared.status, 200);
+    got = await cap();
+    assert.equal(got.status, 200);
+    assert.ok(got.cache.includes('no-store'), `capabilities answers no-store, got ${got.cache}`);
+    assert.deepEqual(got.body, { workDashboardUrl: null }, 'capabilities is null again after clearing with ""');
+  } finally {
+    await call('PUT', '/api/config', { workDashboardUrl: null });
+  }
+}
+console.log('PASS (server): config route accepts, refuses and clears workDashboardUrl; capabilities answers the one field with no-store');
