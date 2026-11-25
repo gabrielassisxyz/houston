@@ -47,7 +47,9 @@ survives.
 - **The gate is local, because this repository has no CI.** For a change that touches code or
   tests: `npm run lint` and `npm run build` pass on the branch, and every test script under
   `scripts/` that the change adds or touches passes, including the ones that need an isolated
-  server. A code change whose gate was not run is not mergeable, however it looks.
+  server. A change that touches `notes/` or `scripts/check-notes-deps.sh` also passes the Go
+  gate in the notes-module section below. A code change whose gate was not run is not
+  mergeable, however it looks.
 - **Review before merging.** The grant replaces waiting, not reviewing. Read the diff against the
   bead's acceptance criteria, and break each new test's guard on purpose once to watch it fail.
 - **The bead closes with its landing.** Bring the branch up to date with `main` first, by merging
@@ -69,6 +71,23 @@ survives.
   both sides' intent; when that is not obvious, stop and ask.
 
 This is a grant for this repository. It says nothing about any other.
+
+<!-- This section is project-owned. -->
+# notes/ — a Go module copied from kernl
+
+`notes/` is a Go module of Houston's own (`github.com/gabrielassisxyz/houston/notes`),
+copied from kernl's notes engine as it is at commit `488fbbe` — see
+`notes/README.md` for the provenance, the exact copy commands, and the packages taken
+and left out. It needs Go 1.26 or later.
+
+A change that touches `notes/` or `scripts/check-notes-deps.sh` passes, besides the
+present gate, the four commands of the Go gate: `go vet ./...`, `go test ./...` and
+`go build -o /dev/null ./cmd/houston`, each run inside `notes/`, and
+`scripts/check-notes-deps.sh` from the repository root. The check runs
+`go list -deps ./cmd/houston` inside `notes/` and fails, naming each offender, on any
+package the copy leaves out. `-o /dev/null` because a plain
+`go build ./cmd/houston` leaves a binary `notes/houston` behind, which `.gitignore`
+ignores for the same reason.
 
 <!-- This section is project-owned. -->
 # Running the tests

@@ -67,4 +67,10 @@ next-env.d.ts
 # Claude Code git worktrees — transient working copies of the repo, never source.
 # (Other .claude/ files like commands/ and settings.json stay tracked.)
 .claude/worktrees/
+
+# notes engine (Go module of Houston's own, copied from kernl).
+# A plain `go build ./cmd/houston` run inside notes/ leaves a binary
+# notes/houston behind; the Go gate builds with -o /dev/null for the same reason.
+notes/houston
+# The install and update scripts build the notes service's binary here.
 /notes/bin/
