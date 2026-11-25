@@ -525,6 +525,9 @@ func (r *Reconciler) OnCreate(ctx context.Context, absPath string) error {
 	}
 	relPath := r.relPath(absPath)
 	r.clearReports(relPath)
+	if r.skipUnindexable(relPath, raw) {
+		return nil
+	}
 
 	fm, raw, err := parseAndInject(absPath, raw)
 	if err != nil {
@@ -817,6 +820,9 @@ func (r *Reconciler) OnChange(ctx context.Context, absPath string) error {
 	}
 	relPath := r.relPath(absPath)
 	r.clearReports(relPath)
+	if r.skipUnindexable(relPath, raw) {
+		return nil
+	}
 
 	fm, raw, err := parseAndInject(absPath, raw)
 	if err != nil {
@@ -916,6 +922,29 @@ func (r *Reconciler) pathStillHolds(relPath, id string) bool {
 		return true
 	}
 	return fm.ID == id
+}
+
+// skipUnindexable reports, and returns true for, a file the reconciler
+// neither indexes nor writes. A zero-byte file is what a sync client leaves as
+// a placeholder before the content arrives: injecting an id would write a
+// frontmatter block into it, and the content arriving later would then
+// conflict with the service's write. A file that is not valid UTF-8 is not
+// text the index can hold, and an id written into it would be a guess at its
+// encoding. The node of a note already indexed at that path is left as it was.
+func (r *Reconciler) skipUnindexable(relPath string, raw []byte) bool {
+	var kind ReportKind
+	switch {
+	case len(raw) == 0:
+		kind = ReportEmptyFile
+		r.report(relPath, kind, "zero bytes; left untouched until it has content")
+	case !utf8.Valid(raw):
+		kind = ReportInvalidUTF8
+		r.report(relPath, kind, "not valid UTF-8; left untouched")
+	default:
+		return false
+	}
+	slog.Warn("reconcile: file left out of the index", "path", relPath, "reason", string(kind))
+	return true
 }
 
 // reportDuplicate records that relPath was left out because holder keeps id.

@@ -42,11 +42,14 @@ func (r *Reconciler) ColdStart(ctx context.Context) error {
 	byUUID := make(map[string]cachedPathEntry, len(cached))
 	// byHash: content_hash → uuid (for hash-tiebreak move detection)
 	byHash := make(map[string]string, len(cached))
+	// byPath: path → uuid, so a file the walk skips still keeps its note alive.
+	byPath := make(map[string]string, len(cached))
 	for _, e := range cached {
 		byUUID[e.uuid] = e
 		if e.contentHash != "" {
 			byHash[e.contentHash] = e.uuid
 		}
+		byPath[e.path] = e.uuid
 	}
 
 	// --- Phase 2: walk vault, classify, act ---
@@ -82,7 +85,7 @@ func (r *Reconciler) ColdStart(ctx context.Context) error {
 
 		// A single malformed or conflicting file must never abort cold-start and
 		// take down the whole server - log it and keep walking.
-		if rerr := r.reconcileFile(ctx, path, byUUID, byHash, seenUUIDs, hashTakenBy); rerr != nil {
+		if rerr := r.reconcileFile(ctx, path, byUUID, byHash, byPath, seenUUIDs, hashTakenBy); rerr != nil {
 			slog.Warn("coldstart: reconcile file failed; skipping", "path", path, "error", rerr)
 		}
 		return nil
@@ -121,21 +124,37 @@ func (r *Reconciler) reconcileFile(
 	absPath string,
 	byUUID map[string]cachedPathEntry,
 	byHash map[string]string,
+	byPath map[string]string,
 	seenUUIDs map[string]struct{},
 	hashTakenBy map[string]string,
 ) error {
 	relPath := r.relPath(absPath)
 	r.clearReports(relPath)
 
+	// A file skipped below is still on disk, so the note indexed at its path
+	// is still there: unmarked, the tombstone sweep would delete it because
+	// its file became a placeholder, or could not be read for a moment.
+	keepCachedNote := func() {
+		if id, ok := byPath[relPath]; ok {
+			seenUUIDs[id] = struct{}{}
+		}
+	}
+
 	raw, err := os.ReadFile(absPath)
 	if err != nil {
 		slog.Warn("coldstart: read file failed", "path", absPath, "error", err)
+		keepCachedNote()
+		return nil
+	}
+	if r.skipUnindexable(relPath, raw) {
+		keepCachedNote()
 		return nil
 	}
 
 	fm, parseErr := frontmatter.Parse(raw)
 	if parseErr != nil {
 		slog.Warn("coldstart: frontmatter parse failed", "path", absPath, "error", parseErr)
+		keepCachedNote()
 		return nil
 	}
 	// Here as well as in OnCreate and OnChange: a file unchanged since the

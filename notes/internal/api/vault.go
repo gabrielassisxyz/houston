@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -189,14 +190,22 @@ func registerVaultRoutes(mux *http.ServeMux, d Deps) {
 			vaultFileWriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-			vaultFileWriteError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
 
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			vaultFileWriteError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		// The reconciler never indexes a zero-byte file or a note that is not
+		// UTF-8, so writing one would answer "saved" for a note the index then
+		// never shows - the orphan the permission check below also refuses.
+		if len(body) == 0 {
+			vaultFileWriteError(w, http.StatusBadRequest, filePath+": the body is empty, and an empty file is never indexed")
+			return
+		}
+		if strings.HasSuffix(fullPath, ".md") && !utf8.Valid(body) {
+			vaultFileWriteError(w, http.StatusBadRequest, filePath+": the body is not valid UTF-8, and such a note is never indexed")
 			return
 		}
 
@@ -272,6 +281,13 @@ func registerVaultRoutes(mux *http.ServeMux, d Deps) {
 					return
 				}
 			}
+		}
+
+		// Only now, after every check: a refused request must leave nothing
+		// behind, not even the directories its path named.
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+			vaultFileWriteError(w, http.StatusInternalServerError, err.Error())
+			return
 		}
 
 		err = os.WriteFile(fullPath, body, 0644)
