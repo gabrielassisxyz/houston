@@ -97,6 +97,8 @@ accepts(checkPipelineRepo('a/b'), 'a/b', 'one-character pipeline repository');
 // pipelineRepo: refused per rule.
 refuses(checkPipelineRepo('org/..'), 'repository parent reference');
 refuses(checkPipelineRepo('org/.'), 'repository self reference');
+refuses(checkPipelineRepo('org/repo-a/extra'), 'repository with a third segment');
+refuses(checkPipelineRepo('org'), 'repository without a name');
 refuses(checkPipelineRepo('Org/repo-a'), 'uppercase repository owner');
 refuses(checkPipelineRepo('org/Repo-A'), 'uppercase repository name');
 
