@@ -81,4 +81,130 @@ const minimal = { id: 'bd-1', title: 't', status: 'open', issue_type: 'task' };
   assert.equal((await store.get('bd-null'))?.external_ref, null, 'get answers a bead whose reference is null');
 }
 
-console.log('PASS external_ref: schema and bd reads');
+// ---------------------------------------------------------------- the input schemas
+{
+  const { createInputSchema, updateInputSchema } = loader()('schema');
+  const inputs = [
+    ['create', (extra) => createInputSchema.safeParse({ title: 't', ...extra })],
+    ['update', (extra) => updateInputSchema.safeParse(extra)],
+  ];
+  for (const [name, parse] of inputs) {
+    const accepted = (value) => {
+      const res = parse({ external_ref: value });
+      assert.ok(res.success, `${name} accepts ${JSON.stringify(value)}: ${res.error?.message}`);
+      return res.data.external_ref;
+    };
+    const refused = (value) => {
+      const res = parse({ external_ref: value });
+      assert.equal(res.success, false, `${name} refuses ${JSON.stringify(value)}`);
+      assert.deepEqual(res.error.issues.map((i) => i.path.join('.')), ['external_ref'], `${name} blames the reference`);
+    };
+    assert.equal(accepted('  STRY00000001 \n'), 'STRY00000001', `${name} trims`);
+    assert.equal(accepted('x'.repeat(128)), 'x'.repeat(128), `${name} accepts 128 characters`);
+    assert.equal(accepted(` ${'x'.repeat(128)} `), 'x'.repeat(128), `${name} counts the length after trimming`);
+    refused('x'.repeat(129));
+    for (const control of ['\u0000', '\n', '\t', '\u001f', '\u007f']) refused(`STRY${control}00000001`);
+    refused('\u0000STRY00000001');
+    // Only control characters are refused here; what else a reference may hold is the tracker's call.
+    assert.equal(accepted('org/repo-a #~é'), 'org/repo-a #~é', `${name} leaves printable text alone`);
+    refused(null);
+    assert.equal(accepted(''), '', `${name} keeps an empty string`);
+    assert.equal(accepted('   '), '', `${name} reads blanks as empty`);
+    const without = parse({});
+    assert.ok(without.success, `${name} does not require the field`);
+    assert.equal(Object.hasOwn(without.data, 'external_ref'), false, `${name} adds no default`);
+  }
+}
+
+// ---------------------------------------------------------------- demo store
+{
+  const load = loader();
+  const { createInputSchema, updateInputSchema } = load('schema');
+  const { demoStore } = load('demo-store');
+  const create = (extra) => demoStore.create(createInputSchema.parse({ title: 'demo', ...extra }), 'actor');
+  const update = (id, patch) => demoStore.update(id, updateInputSchema.parse(patch), 'actor');
+  // The reference as both read paths answer it, and whether the key is there at all.
+  const check = async (id, expected, what) => {
+    const paths = [['get', await demoStore.get(id)], ['list', (await demoStore.list()).find((b) => b.id === id)]];
+    for (const [where, bead] of paths) {
+      assert.equal(bead.external_ref, expected, `demo ${what}: ${where}`);
+      assert.equal(Object.hasOwn(bead, 'external_ref'), expected !== undefined, `demo ${what}: ${where} key`);
+    }
+  };
+
+  const made = await create({ external_ref: 'STRY00000001' });
+  assert.equal(made.external_ref, 'STRY00000001', 'demo create answers the reference');
+  await check(made.id, 'STRY00000001', 'create');
+  await check((await create({})).id, undefined, 'create without a reference');
+  await check((await create({ external_ref: '' })).id, undefined, 'create with an empty reference');
+
+  assert.equal((await update(made.id, { external_ref: 'INC00000001' })).external_ref, 'INC00000001', 'demo update answers the reference');
+  await check(made.id, 'INC00000001', 'update');
+  await update(made.id, { priority: 1 });
+  await check(made.id, 'INC00000001', 'update without the field');
+  // The key present and undefined is what an assignment of the whole patch would copy over.
+  await demoStore.update(made.id, { priority: 0, external_ref: undefined }, 'actor');
+  await check(made.id, 'INC00000001', 'update with an undefined field');
+  assert.equal((await demoStore.get(made.id)).priority, 0, 'the rest of that patch applied');
+  const cleared = await update(made.id, { external_ref: '' });
+  assert.equal(Object.hasOwn(cleared, 'external_ref'), false, 'demo clear answers a bead without the key');
+  await check(made.id, undefined, 'clear');
+  await update(made.id, { external_ref: '' });
+  await check(made.id, undefined, 'clear of a bead without a reference');
+  await update(made.id, { external_ref: 'CHG00000001' });
+  await check(made.id, 'CHG00000001', 'set again after a clear');
+}
+
+// ---------------------------------------------------------------- bd store: writes
+{
+  let stored = {};
+  const { calls, store } = stubbedBd((args) => {
+    if (args[0] === 'create') return JSON.stringify({ schema_version: 1, data: { id: 'bd-1' } });
+    if (args[0] === 'show') return JSON.stringify({ schema_version: 1, data: [{ ...minimal, ...stored }] });
+    if (args[0] === 'update') return '';
+    return assert.fail(`unexpected bd command: ${args.join(' ')}`);
+  });
+  const { createInputSchema } = loader()('schema');
+  // The commands one operation ran for a verb, and the flag with the value after it.
+  const ran = async (verb, operation) => {
+    calls.length = 0;
+    const bead = await operation();
+    return { bead, commands: calls.filter((args) => args[0] === verb) };
+  };
+  const flagOf = (args) => {
+    const at = args.indexOf('--external-ref');
+    return at === -1 ? null : args.slice(at, at + 2);
+  };
+  const noFlag = (args) => !args.some((a) => a.startsWith('--external-ref'));
+
+  for (const value of ['STRY00000001', '-INC00000001']) {
+    stored = { external_ref: value };
+    const { bead, commands } = await ran('create', () => store.create(createInputSchema.parse({ title: 't', external_ref: value }), 'actor'));
+    assert.equal(commands.length, 1, 'one bd create');
+    assert.deepEqual(flagOf(commands[0]), ['--external-ref', value], 'bd create sends the flag and the value');
+    assert.equal(bead.external_ref, value, 'bd create answers the reference');
+  }
+  stored = {};
+  for (const extra of [{}, { external_ref: '' }]) {
+    const { commands } = await ran('create', () => store.create(createInputSchema.parse({ title: 't', ...extra }), 'actor'));
+    assert.equal(commands.length, 1, 'one bd create');
+    assert.ok(noFlag(commands[0]), `bd create sends no flag for ${JSON.stringify(extra)}: ${commands[0]}`);
+  }
+
+  for (const value of ['CHG00000001', '-INC00000001', '']) {
+    stored = value ? { external_ref: value } : {};
+    const { bead, commands } = await ran('update', () => store.update('bd-1', { external_ref: value }, 'actor'));
+    assert.equal(commands.length, 1, `bd update runs for ${JSON.stringify(value)}`);
+    assert.deepEqual(flagOf(commands[0]), ['--external-ref', value], `bd update sends the flag with ${JSON.stringify(value)}`);
+    assert.equal(bead.external_ref, value || undefined, 'bd update answers what the tracker holds');
+  }
+  const other = await ran('update', () => store.update('bd-1', { priority: 1 }, 'actor'));
+  assert.equal(other.commands.length, 1, 'bd update runs for another field');
+  assert.ok(noFlag(other.commands[0]), `bd update leaves the reference alone: ${other.commands[0]}`);
+  for (const patch of [{}, { external_ref: undefined }]) {
+    const { commands } = await ran('update', () => store.update('bd-1', patch, 'actor'));
+    assert.deepEqual(commands, [], 'an absent reference is no reason to run bd update');
+  }
+}
+
+console.log('PASS external_ref: schema, input schemas, demo store and bd store');

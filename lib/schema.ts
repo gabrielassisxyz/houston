@@ -154,6 +154,16 @@ export function unwrapEnvelope(raw: unknown): unknown {
 
 // ---- Input shapes for writes ----
 
+/**
+ * A reference as a person pastes it. Control characters are refused here because a NUL reaches
+ * `execFile`, which throws on it, and the client would get Node's own message.
+ */
+const externalRefInput = z
+  .string()
+  .trim()
+  .max(128)
+  .regex(/^[^\u0000-\u001f\u007f]*$/, "External reference cannot contain control characters");
+
 export const createInputSchema = z.object({
   title: z.string().min(1, "Title is required").max(500),
   issue_type: z.enum(BEAD_TYPES).default("task"),
@@ -162,6 +172,8 @@ export const createInputSchema = z.object({
   assignee: z.string().optional().default(""),
   labels: z.array(z.string()).optional().default([]),
   parent: z.string().optional().default(""),
+  /** No default: it would make the field required of every `CreateInput` the app builds. */
+  external_ref: externalRefInput.optional(),
   /** When true, the bead starts in the Backlog (deferred) instead of Ready. */
   backlog: z.boolean().optional().default(false),
 });
@@ -189,6 +201,8 @@ export const updateInputSchema = z.object({
    * expressible intent and reparenting impossible to distinguish from a no-op.
    */
   parent: z.string().optional(),
+  /** Absent means "leave the reference alone", `""` means "clear it". No default, as above. */
+  external_ref: externalRefInput.optional(),
 });
 export type UpdateInput = z.infer<typeof updateInputSchema>;
 

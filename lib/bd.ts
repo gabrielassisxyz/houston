@@ -191,6 +191,7 @@ export function createBdStore(repoPath: string): BeadsStore {
         if (input.assignee) args.push("--assignee", input.assignee);
         if (input.labels?.length) args.push("-l", input.labels.join(","));
         if (input.parent) args.push("--parent", input.parent);
+        if (input.external_ref) args.push("--external-ref", input.external_ref);
         const created = await runBdJson<{ id: string }>(args, rw(actor));
         const id = created.id;
         if (input.backlog) {
@@ -212,6 +213,8 @@ export function createBdStore(repoPath: string): BeadsStore {
         // `!== undefined` rather than a truthiness check: `""` is the detach
         // signal, so `if (patch.parent)` would make detaching inexpressible.
         if (patch.parent !== undefined) args.push("--parent", patch.parent);
+        // `""` clears the reference, so the same check as for the parent.
+        if (patch.external_ref !== undefined) args.push("--external-ref", patch.external_ref);
         // Labels are replace-all. `bd update --set-labels ""` is silently
         // dropped (verified against bd 1.1.0) — an empty value never clears —
         // so the "remove every label" case has to go through --remove-label
