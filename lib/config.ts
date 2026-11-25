@@ -2,7 +2,9 @@ import "server-only";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import { checkWorkDashboardUrl } from "./loopback-url";
 
 /**
  * Local app config (NOT stored in beads). Lives as a small JSON file under the
@@ -39,6 +41,21 @@ export interface AppConfig {
    * follows the computed default, even if an older version wrote it to disk.
    */
   humanActorChosen?: boolean;
+  /**
+   * Address of the work dashboard page served by the local collector program,
+   * framed inside Houston at the route /work. Absent when unset; `null` is
+   * never stored or returned.
+   */
+  workDashboardUrl?: string;
+}
+
+/** Patch type for `saveConfig`: `workDashboardUrl` is `string | null`. */
+export interface SaveConfigPatch {
+  humanActor?: string;
+  humanAllowlist?: string[];
+  pollIntervalMs?: number;
+  gamification?: boolean;
+  workDashboardUrl?: string | null;
 }
 
 /**
@@ -212,24 +229,48 @@ function sanitizeProjects(input: unknown): ProjectEntry[] {
 
 let cached: AppConfig | null = null;
 
+/** True only for a plain JSON object: non-null, non-array. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /**
  * Persist the config, preserving any unknown keys already on disk (e.g. the
  * legacy `repoPath`/`demo` fields) so older app versions can still read them.
+ * The file is replaced atomically through a UUID-named temporary file of mode
+ * `0600` and kept readable by its owner only. Best-effort: a failure is logged
+ * and the new value still applies for the session.
  */
-function persist(cfg: AppConfig): void {
+function persist(cfg: AppConfig, deleteKeys?: string[]): void {
   cached = cfg;
   try {
-    fs.mkdirSync(configDir(), { recursive: true });
+    const dir = configDir();
+    fs.mkdirSync(dir, { recursive: true });
     let base: Record<string, unknown> = {};
     try {
-      base = JSON.parse(fs.readFileSync(configFile(), "utf8")) as Record<string, unknown>;
+      const raw: unknown = JSON.parse(fs.readFileSync(configFile(), "utf8"));
+      if (isRecord(raw)) base = raw;
+      else base = {};
     } catch {
       base = {};
     }
-    const next = { ...base, ...cfg };
-    fs.writeFileSync(configFile(), JSON.stringify(next, null, 2), "utf8");
-  } catch {
-    /* best-effort; config still applies for the session */
+    const next: Record<string, unknown> = { ...base, ...cfg };
+    if (deleteKeys) {
+      for (const k of deleteKeys) delete next[k];
+    }
+    const temp = path.join(dir, `${randomUUID()}.tmp`);
+    try {
+      fs.writeFileSync(temp, JSON.stringify(next, null, 2), { mode: 0o600 });
+      fs.renameSync(temp, configFile());
+    } finally {
+      try {
+        fs.rmSync(temp, { force: true });
+      } catch {
+        /* the temp file is already gone */
+      }
+    }
+  } catch (e) {
+    console.warn(`[houston] config: could not write config file: ${(e as Error)?.message ?? String(e)}`);
   }
 }
 
@@ -241,7 +282,8 @@ export function getConfig(): AppConfig {
     | (Partial<AppConfig> & { repoPath?: string; demo?: boolean })
     | null = null;
   try {
-    onDisk = JSON.parse(fs.readFileSync(configFile(), "utf8"));
+    const raw: unknown = JSON.parse(fs.readFileSync(configFile(), "utf8"));
+    onDisk = isRecord(raw) ? (raw as Partial<AppConfig> & { repoPath?: string; demo?: boolean }) : null;
   } catch {
     onDisk = null;
   }
@@ -270,6 +312,15 @@ export function getConfig(): AppConfig {
     gamification: typeof onDisk?.gamification === "boolean" ? onDisk.gamification : d.gamification,
     humanActorChosen: onDisk?.humanActorChosen === true,
   };
+
+  if (onDisk && onDisk.workDashboardUrl !== undefined) {
+    const checked = checkWorkDashboardUrl(onDisk.workDashboardUrl);
+    if (checked.ok) {
+      merged.workDashboardUrl = checked.url;
+    } else {
+      console.warn(`[houston] config: workDashboardUrl ignored: ${checked.reason}`);
+    }
+  }
 
   // One-time migration: back-fill the registry from the legacy single repoPath
   // (or BEADS_REPO / cwd) when no projects array exists yet.
@@ -304,13 +355,35 @@ export function closeActor(assignee: string | null | undefined): string {
   return assignee && assignee !== humanActor && assignee === osUserName() ? assignee : humanActor;
 }
 
-/** Update global settings (actor / allowlist / poll). Project registry has its own mutators. */
-export function saveConfig(
-  patch: Partial<Pick<AppConfig, "humanActor" | "humanAllowlist" | "pollIntervalMs" | "gamification">>,
-): AppConfig {
-  const next = { ...getConfig(), ...patch };
+/** Update global settings (actor / allowlist / poll / dashboard). Project registry has its own mutators. */
+export function saveConfig(patch: SaveConfigPatch): AppConfig {
+  const current = getConfig();
+  let normalisedUrl: string | undefined;
+  if (patch.workDashboardUrl !== undefined && patch.workDashboardUrl !== null) {
+    const checked = checkWorkDashboardUrl(patch.workDashboardUrl);
+    if (!checked.ok) {
+      throw new ConfigError(checked.reason, "invalid_config");
+    }
+    normalisedUrl = checked.url;
+  }
+  const next: AppConfig = { ...current };
+  if (patch.humanActor !== undefined) next.humanActor = patch.humanActor;
+  if (patch.humanAllowlist !== undefined) next.humanAllowlist = patch.humanAllowlist;
+  if (patch.pollIntervalMs !== undefined) next.pollIntervalMs = patch.pollIntervalMs;
+  if (patch.gamification !== undefined) next.gamification = patch.gamification;
+  if (patch.workDashboardUrl !== undefined) {
+    if (patch.workDashboardUrl === null) {
+      delete next.workDashboardUrl;
+    } else {
+      next.workDashboardUrl = normalisedUrl as string;
+    }
+  }
   if (patch.humanActor !== undefined) next.humanActorChosen = true;
-  persist(next);
+  if (patch.workDashboardUrl === null) {
+    persist(next, ["workDashboardUrl"]);
+  } else {
+    persist(next);
+  }
   return next;
 }
 
