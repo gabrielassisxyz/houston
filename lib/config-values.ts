@@ -1,16 +1,17 @@
 /**
- * Chain config value validators.
+ * Config value validators.
  *
  * Pure validators for the chain keys of step 3 (`snapshotPath`,
  * `serviceNowHost`, `githubOrgs`), the pipeline repository of step 5 and the
  * ticket-number shape of provisional decision 4, so steps 5 and 6 share one
- * definition. Kept free of imports so pure scripts can load it directly, like
- * `lib/loopback-url.ts`.
+ * definition, and for the Obsidian vault name. Kept free of imports so pure
+ * scripts can load it directly, like `lib/loopback-url.ts`.
  *
  * Each answers `{ ok: true, value }` or `{ ok: false, reason }` with a
  * non-empty sentence, as phase 1's `checkWorkDashboardUrl` does. Accepted
  * values are returned as-is, except `checkGithubOrgs`, which returns a copy of
- * the patch's list so the stored value never aliases the caller's array.
+ * the patch's list so the stored value never aliases the caller's array, and
+ * `checkObsidianVault`, which returns the trimmed name.
  */
 
 export type StringCheck = { ok: true; value: string } | { ok: false; reason: string };
@@ -40,6 +41,24 @@ export function checkSnapshotPath(value: unknown): StringCheck {
     return { ok: false, reason: "Snapshot path must start with /." };
   }
   return { ok: true, value };
+}
+
+/**
+ * Check a candidate Obsidian vault name: a string that is non-empty once
+ * trimmed, with no ASCII control character.
+ */
+export function checkObsidianVault(value: unknown): StringCheck {
+  if (typeof value !== "string") {
+    return { ok: false, reason: "Obsidian vault name must be a string." };
+  }
+  const trimmed = value.trim();
+  if (trimmed === "") {
+    return { ok: false, reason: "Obsidian vault name must not be empty." };
+  }
+  if (/[\x00-\x1F\x7F]/.test(trimmed)) {
+    return { ok: false, reason: "Obsidian vault name must not contain control characters." };
+  }
+  return { ok: true, value: trimmed };
 }
 
 function isOwnerLabel(label: string): boolean {
