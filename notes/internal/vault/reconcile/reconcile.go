@@ -886,6 +886,29 @@ func (r *Reconciler) OnChange(ctx context.Context, absPath string) error {
 	if fm.ID == "" {
 		return r.OnCreate(ctx, absPath)
 	}
+	contentHash := HashBytes(raw)
+
+	// The watcher reports a recreated file as a change, never as a create, so
+	// a note deleted and written again arrives here. A delete still pending
+	// for it is matched by its id or its content hash, never by path alone: a
+	// new note written under a deleted note's name is not that note, and must
+	// not cancel its delete. A tombstoned id is the note coming back after its
+	// window. Both are OnCreate's to settle - it cancels the delete or revives
+	// the note - since updating a tombstoned row in place keeps it hidden.
+	if r.hasPendingDelete(fm.ID, contentHash) {
+		return r.OnCreate(ctx, absPath)
+	}
+	var tombstoned bool
+	if err := r.g.DoRead(ctx, func(tx *graph.ReadTx) error {
+		var err error
+		tombstoned, err = nodes.IsNoteTombstoned(ctx, tx, fm.ID)
+		return err
+	}); err != nil {
+		return fmt.Errorf("reconcile OnChange %q: tombstone check: %w", absPath, err)
+	}
+	if tombstoned {
+		return r.OnCreate(ctx, absPath)
+	}
 
 	// The watcher reports a new file as a change, never as a create, so this
 	// is where a live copy of a note arrives. Updating the node from it would
@@ -901,7 +924,6 @@ func (r *Reconciler) OnChange(ctx context.Context, absPath string) error {
 	author := ResolveAuthor(fm.Author)
 	title := resolveTitle(fm, absPath)
 	body := extractBody(raw)
-	contentHash := HashBytes(raw)
 
 	var promoted int
 	var displaced *pendingDelete
@@ -1433,6 +1455,25 @@ func (r *Reconciler) consumePendingDelete(noteID, contentHash string) *pendingDe
 	}
 
 	return nil
+}
+
+// hasPendingDelete reports, without consuming it, whether a delete is pending
+// for the note with this id or this content hash.
+func (r *Reconciler) hasPendingDelete(noteID, contentHash string) bool {
+	r.pendingMu.Lock()
+	defer r.pendingMu.Unlock()
+	if _, ok := r.pendingDeletes[noteID]; ok && noteID != "" {
+		return true
+	}
+	if contentHash == "" {
+		return false
+	}
+	for _, pd := range r.pendingDeletes {
+		if pd.contentHash == contentHash {
+			return true
+		}
+	}
+	return false
 }
 
 // pathClaimed finishes a committed claimPathInTx. The note now bound to a path

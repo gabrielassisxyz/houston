@@ -124,12 +124,8 @@ func (s *Service) Stop() {
 	slog.Info("vault: stopped")
 }
 
-// routeEvents reads from the watcher's event channel and dispatches to the
-// reconciler. Handler errors are logged but do not terminate the loop.
-//
-// On Linux, inotify often coalesces a file create+write into a single KindChange
-// event. When OnChange returns graph.ErrNotFound (node not yet in the graph),
-// the router retries the path as OnCreate so the note is properly ingested.
+// routeEvents reads from the watcher's event channel and dispatches each event
+// to the reconciler until the context ends or the channel closes.
 func (s *Service) routeEvents(ctx context.Context) {
 	defer s.wg.Done()
 	for {
@@ -140,44 +136,69 @@ func (s *Service) routeEvents(ctx context.Context) {
 			if !ok {
 				return
 			}
-			var err error
-			switch ev.Kind {
-			case watcher.KindCreate:
-				err = s.r.OnCreate(ctx, ev.Path)
-			case watcher.KindMoveCandidate:
-				// fsnotify reports Rename on the OLD path of a move, which has
-				// already vanished from disk. Identity is preserved by the
-				// create/change event on the NEW path (its embedded frontmatter
-				// UUID is recognized there), so a move_candidate whose file is
-				// gone is a no-op for us - not an error. If the path unexpectedly
-				// still exists, fall through to create handling.
-				if _, statErr := os.Stat(ev.Path); statErr == nil {
-					err = s.r.OnCreate(ctx, ev.Path)
-				} else {
-					slog.Debug("vault: move_candidate path already gone; identity handled by new-path event",
-						"path", ev.Path)
-				}
-			case watcher.KindChange:
-				err = s.r.OnChange(ctx, ev.Path)
-				if errors.Is(err, graph.ErrNotFound) {
-					// Node not in graph yet - this create+write was coalesced;
-					// treat it as a create.
-					err = s.r.OnCreate(ctx, ev.Path)
-				}
-			case watcher.KindDelete:
-				err = s.r.OnDelete(ctx, ev.Path)
-			case watcher.KindDirDelete:
-				err = s.r.OnDirDelete(ctx, ev.Path)
-			}
-			if err != nil {
-				slog.Error("vault: reconcile event error",
-					"kind", ev.Kind,
-					"path", ev.Path,
-					"error", err,
-				)
-			}
+			s.route(ctx, ev)
 		}
 	}
+}
+
+// route dispatches one watcher event to the reconciler. Handler errors are
+// logged but do not stop the caller.
+func (s *Service) route(ctx context.Context, ev watcher.ChangeEvent) {
+	var err error
+	switch ev.Kind {
+	case watcher.KindCreate:
+		err = s.r.OnCreate(ctx, ev.Path)
+	case watcher.KindMoveCandidate:
+		// fsnotify reports Rename on the OLD path of a move, which has already
+		// vanished from disk. It goes to OnDelete, which holds the delete for
+		// the move window: a move within the vault keeps the note's identity
+		// through the change at the new path, and a note moved where no event
+		// will name it again - into .trash/, a dot-directory nobody watches,
+		// or out of the vault - is tombstoned when the window ends. If the path
+		// unexpectedly still exists, fall through to create handling.
+		if fileExists(ev.Path) {
+			err = s.r.OnCreate(ctx, ev.Path)
+		} else {
+			err = s.r.OnDelete(ctx, ev.Path)
+		}
+	case watcher.KindChange:
+		err = s.change(ctx, ev.Path)
+	case watcher.KindDelete:
+		// A delete and a recreate inside one coalesce window - an editor that
+		// unlinks the file and writes it anew - coalesce to a delete for a
+		// file that is back on disk: that is a change, not a delete.
+		if fileExists(ev.Path) {
+			err = s.change(ctx, ev.Path)
+		} else {
+			err = s.r.OnDelete(ctx, ev.Path)
+		}
+	case watcher.KindDirDelete:
+		err = s.r.OnDirDelete(ctx, ev.Path)
+	}
+	if err != nil {
+		slog.Error("vault: reconcile event error",
+			"kind", ev.Kind,
+			"path", ev.Path,
+			"error", err,
+		)
+	}
+}
+
+// change hands a changed path to OnChange. On Linux, inotify often coalesces
+// a file create+write into a single change; when OnChange returns
+// graph.ErrNotFound (no node for the file's id yet), the path is retried as
+// OnCreate so the note is properly ingested.
+func (s *Service) change(ctx context.Context, path string) error {
+	err := s.r.OnChange(ctx, path)
+	if errors.Is(err, graph.ErrNotFound) {
+		err = s.r.OnCreate(ctx, path)
+	}
+	return err
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // flushTicker calls FlushExpired at the given cadence to tombstone deletes
