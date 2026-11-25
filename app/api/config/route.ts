@@ -10,6 +10,7 @@ const patchSchema = z.object({
   humanAllowlist: z.array(z.string()).optional(),
   pollIntervalMs: z.number().int().min(1000).max(300000).optional(),
   gamification: z.boolean().optional(),
+  workDashboardUrl: z.string().nullable().optional(),
 });
 
 export async function GET() {
@@ -19,7 +20,10 @@ export async function GET() {
 export async function PUT(req: Request) {
   try {
     const patch = patchSchema.parse(await req.json());
-    const next = saveConfig(patch);
+    const next =
+      patch.workDashboardUrl === "" || patch.workDashboardUrl === null
+        ? saveConfig({ ...patch, workDashboardUrl: null })
+        : saveConfig(patch);
     // Actor changes affect write attribution; drop cached stores so the next
     // write picks up the new value.
     resetStore();
