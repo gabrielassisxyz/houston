@@ -33,6 +33,7 @@ interface FormState {
   assignee: string;
   parent: string;
   labels: string;
+  external_ref: string;
   backlog: boolean;
 }
 
@@ -130,6 +131,7 @@ function CreateForm({
     assignee: "",
     parent,
     labels: "",
+    external_ref: "",
     backlog: false,
   });
 
@@ -150,7 +152,9 @@ function CreateForm({
       ? "New child bead"
       : "New bead";
 
-  const hasText = [form.title, form.description, form.assignee, form.labels].some((v) => v.trim() !== "");
+  const hasText = [form.title, form.description, form.assignee, form.labels, form.external_ref].some(
+    (v) => v.trim() !== "",
+  );
   React.useEffect(() => {
     dirtyRef.current = hasText;
     return () => {
@@ -205,6 +209,7 @@ function CreateForm({
 
   function submit() {
     if (!form.title.trim() || create.isPending) return;
+    const externalRef = form.external_ref.trim();
     create.mutate(
       {
         title: form.title.trim(),
@@ -214,6 +219,7 @@ function CreateForm({
         assignee: form.assignee,
         labels: form.labels.split(",").map((s) => s.trim()).filter(Boolean),
         parent: form.parent,
+        ...(externalRef ? { external_ref: externalRef } : {}),
         backlog: form.backlog,
       },
       {
@@ -443,6 +449,15 @@ function CreateForm({
             value={form.labels}
             onChange={(e) => set("labels", e.target.value)}
             placeholder="ui, dnd, m3"
+          />
+        </label>
+
+        <label className="flex flex-col gap-[6px]">
+          <span className={labelClass}>Referência externa</span>
+          <input
+            className={`${inputClass} font-mono`}
+            value={form.external_ref}
+            onChange={(e) => set("external_ref", e.target.value)}
           />
         </label>
 
