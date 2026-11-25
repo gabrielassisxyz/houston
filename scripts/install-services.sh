@@ -1,18 +1,27 @@
 #!/usr/bin/env bash
-# Install (or print) the macOS launchd user agent for the Houston hub.
+# Install (or print) the macOS launchd user agents for the Houston hub and notes service.
 #
 # Usage:
 #   scripts/install-services.sh [--node <path>] [--checkout <dir>]
 #                               [--path <PATH>] [--port <n>] [--print]
+#                               [--notes-vault <dir>] [--notes-db <path>]
+#                               [--notes-port <n>] [--print-notes]
 set -euo pipefail
 
 LABEL="houston.hub"
+NOTES_LABEL="houston.notes"
 HOST="127.0.0.1"
 PORT="3300"
+NOTES_PORT="3301"
 NODE_BIN=""
 CHECKOUT=""
 SERVICE_PATH=""
 PRINT_ONLY=0
+PRINT_NOTES_ONLY=0
+NOTES_VAULT=""
+NOTES_DB=""
+NOTES_DB_SET=0
+NOTES_PORT_SET=0
 
 usage() {
   cat <<'EOF'
@@ -28,6 +37,15 @@ Options:
   --port <n>         Port to bind on 127.0.0.1 (default: 3300).
   --print            Print the launchd plist to stdout without touching disk or
                      checking tools.
+  --notes-vault <dir>  Absolute path to the notes vault directory. Enables the
+                     `houston.notes` agent.
+  --notes-db <path>  Absolute path to the notes database file (default:
+                     `${XDG_STATE_HOME:-$HOME/.local/state}/houston/notes.db`).
+                     Requires --notes-vault.
+  --notes-port <n>  Port for the notes service on 127.0.0.1 (default: 3301).
+                     Requires --notes-vault.
+  --print-notes      Print the `houston.notes` plist to stdout without touching
+                     disk or checking tools. Requires --notes-vault.
   -h, --help         Show this help.
 EOF
 }
@@ -85,6 +103,69 @@ default_service_path() {
   printf '%s' "$out"
 }
 
+# Lexical path normalisation, in the shell: collapse repeated slashes, strip a
+# trailing slash (unless root), resolve "." and ".." by path components. macOS
+# realpath has no -m and fails on paths that do not exist yet, so do it here.
+normalize_path() {
+  local p=$1
+  while [[ "$p" == *"//"* ]]; do
+    p=${p//\/\//\/}
+  done
+  if [[ "$p" != "/" ]]; then
+    p=${p%/}
+  fi
+  local out=""
+  local rest="$p"
+  local comp
+  while [[ -n "$rest" ]]; do
+    rest=${rest#/}
+    if [[ -z "$rest" ]]; then
+      break
+    fi
+    if [[ "$rest" == *"/"* ]]; then
+      comp=${rest%%/*}
+      rest=/${rest#*/}
+    else
+      comp="$rest"
+      rest=""
+    fi
+    case "$comp" in
+      ''|.) continue ;;
+      ..)
+        if [[ -n "$out" ]]; then
+          out=${out%/*}
+        fi
+        ;;
+      *)
+        out="$out/$comp"
+        ;;
+    esac
+  done
+  if [[ -z "$out" ]]; then
+    out="/"
+  fi
+  printf '%s' "$out"
+}
+
+# Return 0 when the normalised db path equals the normalised vault or lies
+# inside it, compared by path components so a sibling like /vault-db beside
+# /vault passes.
+notes_db_inside_vault() {
+  local vault=$1
+  local db=$2
+  if [ "$db" = "$vault" ]; then
+    return 0
+  fi
+  if [ "$vault" = "/" ]; then
+    return 0
+  fi
+  local prefix="$vault/"
+  if [ "${db:0:${#prefix}}" = "$prefix" ]; then
+    return 0
+  fi
+  return 1
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --node)
@@ -123,8 +204,43 @@ while [ "$#" -gt 0 ]; do
       PORT=${1#--port=}
       shift
       ;;
+    --notes-vault)
+      [ "$#" -ge 2 ] || die "--notes-vault requires a value"
+      NOTES_VAULT=$2
+      shift 2
+      ;;
+    --notes-vault=*)
+      NOTES_VAULT=${1#--notes-vault=}
+      shift
+      ;;
+    --notes-db)
+      [ "$#" -ge 2 ] || die "--notes-db requires a value"
+      NOTES_DB=$2
+      NOTES_DB_SET=1
+      shift 2
+      ;;
+    --notes-db=*)
+      NOTES_DB=${1#--notes-db=}
+      NOTES_DB_SET=1
+      shift
+      ;;
+    --notes-port)
+      [ "$#" -ge 2 ] || die "--notes-port requires a value"
+      NOTES_PORT=$2
+      NOTES_PORT_SET=1
+      shift 2
+      ;;
+    --notes-port=*)
+      NOTES_PORT=${1#--notes-port=}
+      NOTES_PORT_SET=1
+      shift
+      ;;
     --print)
       PRINT_ONLY=1
+      shift
+      ;;
+    --print-notes)
+      PRINT_NOTES_ONLY=1
       shift
       ;;
     -h|--help)
@@ -137,15 +253,32 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-# Resolve defaults.
-if [ -z "$NODE_BIN" ]; then
-  NODE_BIN=$(command -v node 2>/dev/null || true)
-  [ -n "$NODE_BIN" ] || die "could not find node on PATH; pass --node <absolute path>"
+# Mutually exclusive print modes and notes requirements.
+if [ "$PRINT_ONLY" -eq 1 ] && [ "$PRINT_NOTES_ONLY" -eq 1 ]; then
+  die "--print and --print-notes cannot be combined"
 fi
-case "$NODE_BIN" in
-  /*) ;;
-  *) die "--node must be an absolute path, got: $NODE_BIN" ;;
-esac
+if [ "$NOTES_DB_SET" -eq 1 ] && [ -z "$NOTES_VAULT" ]; then
+  die "--notes-db requires --notes-vault"
+fi
+if [ "$NOTES_PORT_SET" -eq 1 ] && [ -z "$NOTES_VAULT" ]; then
+  die "--notes-port requires --notes-vault"
+fi
+if [ "$PRINT_NOTES_ONLY" -eq 1 ] && [ -z "$NOTES_VAULT" ]; then
+  die "--print-notes requires --notes-vault"
+fi
+
+# Resolve defaults. --print-notes needs no --node, so skip the node default
+# and its absolute-path check in that mode; the notes document never uses it.
+if [ "$PRINT_NOTES_ONLY" -eq 0 ]; then
+  if [ -z "$NODE_BIN" ]; then
+    NODE_BIN=$(command -v node 2>/dev/null || true)
+    [ -n "$NODE_BIN" ] || die "could not find node on PATH; pass --node <absolute path>"
+  fi
+  case "$NODE_BIN" in
+    /*) ;;
+    *) die "--node must be an absolute path, got: $NODE_BIN" ;;
+  esac
+fi
 
 if [ -z "$CHECKOUT" ]; then
   CHECKOUT=$(cd "$(dirname "$0")/.." && pwd -P)
@@ -190,19 +323,71 @@ case "$CONFIG_HOME" in
   *) die "XDG_CONFIG_HOME must be an absolute path, got: $CONFIG_HOME" ;;
 esac
 
+NOTES_ENABLED=0
+if [ -n "$NOTES_VAULT" ]; then
+  NOTES_ENABLED=1
+fi
+
+if [ "$NOTES_ENABLED" -eq 1 ]; then
+  case "$NOTES_VAULT" in
+    /*) ;;
+    *) die "--notes-vault must be an absolute path, got: $NOTES_VAULT" ;;
+  esac
+  if [ "$NOTES_DB_SET" -eq 0 ]; then
+    STATE_HOME=${XDG_STATE_HOME:-$HOME/.local/state}
+    case "$STATE_HOME" in
+      /*) ;;
+      *) die "XDG_STATE_HOME must be an absolute path, got: $STATE_HOME" ;;
+    esac
+    validate_xml_safe "XDG_STATE_HOME" "$STATE_HOME"
+    if [ "$STATE_HOME" != "/" ]; then
+      STATE_HOME=${STATE_HOME%/}
+    fi
+    NOTES_DB="$STATE_HOME/houston/notes.db"
+  fi
+  case "$NOTES_DB" in
+    /*) ;;
+    *) die "--notes-db must be an absolute path, got: $NOTES_DB" ;;
+  esac
+  case "$NOTES_PORT" in
+    ''|*[!0-9]*) die "--notes-port must be an integer between 1 and 65535, got: $NOTES_PORT" ;;
+  esac
+  if [ "$NOTES_PORT" -lt 1 ] || [ "$NOTES_PORT" -gt 65535 ]; then
+    die "--notes-port must be an integer between 1 and 65535, got: $NOTES_PORT"
+  fi
+  if [ "$NOTES_PORT" -eq "$PORT" ]; then
+    die "--notes-port must not equal --port, got: $NOTES_PORT"
+  fi
+  norm_vault=$(normalize_path "$NOTES_VAULT")
+  norm_db=$(normalize_path "$NOTES_DB")
+  if notes_db_inside_vault "$norm_vault" "$norm_db"; then
+    die "--notes-db must not equal or lie inside --notes-vault, got: $NOTES_DB"
+  fi
+fi
+
 AGENTS_DIR="$HOME/Library/LaunchAgents"
 PLIST_FILE="$AGENTS_DIR/$LABEL.plist"
+NOTES_PLIST_FILE="$AGENTS_DIR/$NOTES_LABEL.plist"
 LOG_DIR="$HOME/Library/Logs/houston"
 LOG_FILE="$LOG_DIR/hub.log"
+NOTES_LOG_FILE="$LOG_DIR/notes.log"
 LAUNCHER="$CHECKOUT/bin/houston-web.mjs"
+NOTES_BIN="$CHECKOUT/notes/bin/houston"
 APP_CONFIG_DIR="$CONFIG_HOME/houston"
 APP_CONFIG_FILE="$APP_CONFIG_DIR/config.json"
 
-validate_xml_safe "--node" "$NODE_BIN"
+if [ "$PRINT_NOTES_ONLY" -eq 0 ]; then
+  validate_xml_safe "--node" "$NODE_BIN"
+fi
 validate_xml_safe "--checkout" "$CHECKOUT"
 validate_xml_safe "--path" "$SERVICE_PATH"
 validate_xml_safe "XDG_CONFIG_HOME" "$CONFIG_HOME"
 validate_xml_safe "HOME" "$HOME"
+if [ "$NOTES_ENABLED" -eq 1 ]; then
+  validate_xml_safe "--notes-vault" "$NOTES_VAULT"
+  validate_xml_safe "--notes-db" "$NOTES_DB"
+  validate_xml_safe "--notes-port" "$NOTES_PORT"
+fi
 
 render_plist() {
   cat <<EOF
@@ -242,17 +427,86 @@ render_plist() {
 EOF
 }
 
+render_notes_plist() {
+  local notes_addr="127.0.0.1:$NOTES_PORT"
+  cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$(xml_escape "$NOTES_LABEL")</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$(xml_escape "$NOTES_BIN")</string>
+    <string>serve</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOUSTON_VAULT</key>
+    <string>$(xml_escape "$NOTES_VAULT")</string>
+    <key>HOUSTON_DB</key>
+    <string>$(xml_escape "$NOTES_DB")</string>
+    <key>HOUSTON_ADDR</key>
+    <string>$(xml_escape "$notes_addr")</string>
+    <key>XDG_CONFIG_HOME</key>
+    <string>$(xml_escape "$CONFIG_HOME")</string>
+    <key>PATH</key>
+    <string>$(xml_escape "$SERVICE_PATH")</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>16384</integer>
+  </dict>
+  <key>HardResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>65536</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>$(xml_escape "$NOTES_LOG_FILE")</string>
+  <key>StandardErrorPath</key>
+  <string>$(xml_escape "$NOTES_LOG_FILE")</string>
+</dict>
+</plist>
+EOF
+}
+
 if [ "$PRINT_ONLY" -eq 1 ]; then
   render_plist
   exit 0
 fi
 
+if [ "$PRINT_NOTES_ONLY" -eq 1 ]; then
+  render_notes_plist
+  exit 0
+fi
+
+# Whether the vault is a directory is checked only after --print-notes has had
+# its chance to exit, as --node is, so the document renders on Linux with
+# synthetic paths.
+if [ "$NOTES_ENABLED" -eq 1 ]; then
+  [ -d "$NOTES_VAULT" ] || die "--notes-vault is not a directory: $NOTES_VAULT"
+fi
+
 # Verify tools using the exact PATH the service will receive.
+[ -n "$NODE_BIN" ] || die "could not find node on PATH; pass --node <absolute path>"
 [ -x "$NODE_BIN" ] || die "node binary is not executable: $NODE_BIN"
 PATH="$SERVICE_PATH" command -v br >/dev/null 2>&1 || die "br not found in service PATH: $SERVICE_PATH"
 PATH="$SERVICE_PATH" command -v git >/dev/null 2>&1 || die "git not found in service PATH: $SERVICE_PATH"
+if [ "$NOTES_ENABLED" -eq 1 ]; then
+  command -v go >/dev/null 2>&1 || die "go not found on PATH; install Go 1.26 or later (https://go.dev/dl/) and ensure go is on PATH"
+fi
 
 mkdir -p "$AGENTS_DIR" "$LOG_DIR" "$APP_CONFIG_DIR"
+if [ "$NOTES_ENABLED" -eq 1 ]; then
+  mkdir -p "$CHECKOUT/notes/bin"
+fi
 
 # Seed an explicit empty project list so the hub does not auto-register its own checkout.
 if [ ! -e "$APP_CONFIG_FILE" ]; then
@@ -261,10 +515,29 @@ fi
 
 tmp_plist=$(mktemp "$AGENTS_DIR/.${LABEL}.plist.XXXXXX")
 trap 'rm -f "$tmp_plist"' EXIT
+if [ "$NOTES_ENABLED" -eq 1 ]; then
+  tmp_notes_plist=$(mktemp "$AGENTS_DIR/.${NOTES_LABEL}.plist.XXXXXX")
+  trap 'rm -f "$tmp_plist" "$tmp_notes_plist"' EXIT
+fi
 render_plist > "$tmp_plist"
 mv "$tmp_plist" "$PLIST_FILE"
+if [ "$NOTES_ENABLED" -eq 1 ]; then
+  render_notes_plist > "$tmp_notes_plist"
+  mv "$tmp_notes_plist" "$NOTES_PLIST_FILE"
+fi
 trap - EXIT
 
 uid=$(id -u)
 launchctl bootout "gui/$uid/$LABEL" >/dev/null 2>&1 || true
+if [ "$NOTES_ENABLED" -eq 1 ]; then
+  launchctl bootout "gui/$uid/$NOTES_LABEL" >/dev/null 2>&1 || true
+fi
+
+if [ "$NOTES_ENABLED" -eq 1 ]; then
+  (cd "$CHECKOUT/notes" && go build -o "$NOTES_BIN" ./cmd/houston)
+fi
+
 launchctl bootstrap "gui/$uid" "$PLIST_FILE"
+if [ "$NOTES_ENABLED" -eq 1 ]; then
+  launchctl bootstrap "gui/$uid" "$NOTES_PLIST_FILE"
+fi
