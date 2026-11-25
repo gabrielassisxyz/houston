@@ -187,14 +187,22 @@ func resolvedEdgesForNode(tx *graph.ReadTx, id, label, typ string) ([]resolvedNo
 // computed relevance heuristic), this returns the edges table as persisted  -
 // the source of truth for validating that connections are being made correctly.
 func registerEdgeRoutes(mux *http.ServeMux, g *graph.Graph) {
+	// Pages on request (limit, offset), in id order.
 	mux.HandleFunc("GET /api/edges", func(w http.ResponseWriter, r *http.Request) {
+		p, err := parsePage(r.URL.Query())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		clause, args := p.sqlClause()
 		var out []graphEdge
-		err := g.DoRead(r.Context(), func(tx *graph.ReadTx) error {
+		err = g.DoRead(r.Context(), func(tx *graph.ReadTx) error {
 			rows, err := tx.Query(`
 				SELECT e.id, e.src, e.dst, e.label
 				FROM edges e
 				JOIN nodes s ON s.id = e.src AND s.deleted_at IS NULL
-				JOIN nodes d ON d.id = e.dst AND d.deleted_at IS NULL`)
+				JOIN nodes d ON d.id = e.dst AND d.deleted_at IS NULL
+				ORDER BY e.id`+clause, args...)
 			if err != nil {
 				return err
 			}

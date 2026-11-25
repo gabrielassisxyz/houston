@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -79,8 +80,14 @@ func vaultFileWriteError(w http.ResponseWriter, status int, message string) {
 }
 
 func registerVaultRoutes(mux *http.ServeMux, d Deps) {
+	// Pages on request (limit, offset), in path order.
 	mux.HandleFunc("GET /api/vault/list", func(w http.ResponseWriter, r *http.Request) {
 		root := d.VaultRoot
+		p, err := parsePage(r.URL.Query())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 
 		var files []string
 		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -106,15 +113,25 @@ func registerVaultRoutes(mux *http.ServeMux, d Deps) {
 			}
 			return nil
 		})
+		// The walk's order is per directory, so "a/b.md" comes before
+		// "a-c.md"; a page needs one order over the whole list.
+		sort.Strings(files)
 
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"files": files})
+		_ = json.NewEncoder(w).Encode(map[string]any{"files": pageOf(files, p)})
 	})
 
 	// Vault files joined with their graph nodes (via the reconciler's path
 	// cache). One request gives the UI path→type (list badges) and id→path
-	// (wikilink navigation) without N+1 frontmatter parsing.
+	// (wikilink navigation) without N+1 frontmatter parsing. Pages on request
+	// (limit, offset), in path order.
 	mux.HandleFunc("GET /api/vault/notes", func(w http.ResponseWriter, r *http.Request) {
+		p, err := parsePage(r.URL.Query())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		clause, args := p.sqlClause()
 		type vaultNote struct {
 			Path   string `json:"path"`
 			ID     string `json:"id"`
@@ -123,12 +140,13 @@ func registerVaultRoutes(mux *http.ServeMux, d Deps) {
 			Author string `json:"author"`
 		}
 		out := []vaultNote{}
-		err := d.Graph.DoRead(r.Context(), func(tx *graph.ReadTx) error {
+		err = d.Graph.DoRead(r.Context(), func(tx *graph.ReadTx) error {
 			rows, err := tx.Query(`
 				SELECT np.path, np.uuid, COALESCE(n.type, ''), COALESCE(n.title, ''),
 				       COALESCE(json_extract(n.attrs, '$.author'), '')
 				FROM note_paths np
-				LEFT JOIN nodes n ON n.id = np.uuid AND n.deleted_at IS NULL`)
+				LEFT JOIN nodes n ON n.id = np.uuid AND n.deleted_at IS NULL
+				ORDER BY np.path`+clause, args...)
 			if err != nil {
 				return err
 			}
