@@ -128,6 +128,11 @@ export const beadSchema = z
     comment_count: z.number().optional(),
     parent: z.string().nullable().optional(),
     /**
+     * The item this bead stands for in another tracker. No default, and `null` allowed: a
+     * tracker that emits `null` must not have its bead skipped as invalid.
+     */
+    external_ref: z.string().nullable().optional(),
+    /**
      * Gate sub-type from `bd gate create --type <t>` (human | timer | gh:run |
      * gh:pr | bead). Present only on issue_type "gate". Preserved here — zod
      * strips unknown keys — so the UI can surface human-approval gates that are
