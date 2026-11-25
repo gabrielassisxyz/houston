@@ -157,6 +157,8 @@ function updateArgs(patch: UpdateInput): string[] {
   if (patch.assignee !== undefined) args.push(`--assignee=${patch.assignee}`);
   // An empty value detaches the parent, so test against undefined, not truthiness.
   if (patch.parent !== undefined) args.push(`--parent=${patch.parent}`);
+  // An empty value removes the reference.
+  if (patch.external_ref !== undefined) args.push(`--external-ref=${patch.external_ref}`);
   // An empty value clears every label on br.
   if (patch.labels !== undefined) args.push(`--set-labels=${patch.labels.join(",")}`);
   return args;
@@ -211,6 +213,8 @@ export function createBrStore(repoPath: string): BeadsStore {
       if (input.assignee) args.push(`--assignee=${input.assignee}`);
       if (input.labels?.length) args.push(`--labels=${input.labels.join(",")}`);
       if (input.parent) args.push(`--parent=${input.parent}`);
+      // Non-empty only: `br create` stores an empty reference as `""`, where update removes the key.
+      if (input.external_ref) args.push(`--external-ref=${input.external_ref}`);
       args.push("--", input.title);
       const created = (await runBrJson(args, repoPath, actor)) as { id: string };
       if (input.backlog) await runBr(["update", "--status=deferred", "--", created.id], repoPath, actor);

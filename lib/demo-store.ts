@@ -47,13 +47,22 @@ export const demoStore: BeadsStore = {
       dependencies,
       comments: [],
       parent: input.parent || null,
+      // No key when empty, as on a br bead that has no reference.
+      ...(input.external_ref ? { external_ref: input.external_ref } : {}),
     });
     beads = [...beads, bead];
     return bead;
   },
   async update(id, patch: UpdateInput) {
     const b = find(id);
-    Object.assign(b, patch, { updated_at: nowIso() });
+    // Applied apart from the other fields: assigned with them, an `undefined` would wipe the
+    // reference and `""` would stay as a value, where br removes the key.
+    const { external_ref, ...fields } = patch;
+    Object.assign(b, fields, { updated_at: nowIso() });
+    if (external_ref !== undefined) {
+      if (external_ref) b.external_ref = external_ref;
+      else delete b.external_ref;
+    }
     if (patch.status === "closed" && !b.closed_at) b.closed_at = nowIso();
     // Reparenting: mirror bd's semantics (absent = leave alone, "" = detach)
     // and keep the parent-child EDGE in sync with the field. The rest of the UI

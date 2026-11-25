@@ -1,7 +1,7 @@
 // Isolated server only. Uses a throwaway br tracker; skips when br is not installed.
 // A br-tracked project must open without bd, list its live beads with edges, labels and
-// comments, answer 404 for an unknown id, write through br with the configured actor, refuse
-// a gate plainly, and signal changes.
+// comments, answer 404 for an unknown id, write through br with the configured actor, carry
+// external_ref through every read and write, refuse a gate plainly, and signal changes.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -122,6 +122,12 @@ try {
   const after = await (await fetch(`${api}/beads`)).json();
   assert.equal(after.beads.length, 3, 'the invalid row is skipped, the others remain');
   assert.ok(!after.beads.some((b) => b.id === 'bt-bad'));
+
+  // A null reference is not a reason to skip a row.
+  fs.appendFileSync(path.join(dir, '.beads', 'issues.jsonl'), JSON.stringify({ id: 'bt-null', issue_type: 'task', title: 'null reference', status: 'open', priority: 2, external_ref: null }) + '\n');
+  const nulled = (await (await fetch(`${api}/beads`)).json()).beads.find((b) => b.id === 'bt-null');
+  assert.ok(nulled, 'a bead whose external_ref is null is listed, not skipped');
+  assert.equal(nulled.external_ref, null, 'the list answers the null as the tracker wrote it');
 
   // ---- Writes, in a second tracker so the read-path counts above stay exact ----
   writeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'scotty-br-w-'));
@@ -262,6 +268,77 @@ try {
   const events = log.events ?? [];
   assert.ok(events.length >= 3, `audit log has create, edit and close events: ${JSON.stringify(log)}`);
   assert.ok(events.every((e) => e.actor === actor), `every event is by the actor: ${events.map((e) => e.actor)}`);
+
+  // external_ref, through both read paths of the app and in br itself. An expected value of
+  // `undefined` means the key is absent: neither null nor an empty string.
+  const listBeads = async () => (await ok2xx(await fetch(`${wapi}/beads`), 'list')).beads;
+  const checkRef = async (id, expected, what) => {
+    const reads = {
+      list: (await listBeads()).find((x) => x.id === id),
+      get: await ok2xx(await send(`/${id}`, 'GET'), `${what}: get`),
+      'br show': show(id),
+    };
+    for (const [where, bead] of Object.entries(reads)) {
+      assert.ok(bead, `${what}: ${where} has the bead`);
+      assert.equal(bead.external_ref, expected, `${what}: ${where}`);
+      assert.equal(Object.hasOwn(bead, 'external_ref'), expected !== undefined, `${what}: ${where} key presence`);
+    }
+  };
+  const createRef = async (title, external_ref) => {
+    const answer = await ok2xx(await send('', 'POST', { title, external_ref }), `create ${title}`);
+    assert.equal(answer.external_ref, external_ref?.trim() || undefined, `create ${title}: answer`);
+    return answer.id;
+  };
+  const patchRef = async (id, patch, expected, what) => {
+    const answer = await ok2xx(await send(`/${id}`, 'PATCH', patch), what);
+    assert.equal(answer.external_ref, expected, `${what}: answer`);
+    await checkRef(id, expected, what);
+  };
+
+  const referenced = await createRef('referenced', 'STRY00000001');
+  await checkRef(referenced, 'STRY00000001', 'create with a reference');
+  await checkRef(await createRef('hyphen reference', '-STRY00000002'), '-STRY00000002', 'create with a leading hyphen');
+  await checkRef(await createRef('spaced reference', '  STRY00000003 '), 'STRY00000003', 'create trims');
+  await checkRef(await createRef('no reference'), undefined, 'create without a reference');
+  await checkRef(await createRef('empty reference', ''), undefined, 'create with an empty reference');
+
+  await patchRef(referenced, { external_ref: 'STRY00000004' }, 'STRY00000004', 'patch a new value');
+  await patchRef(referenced, { external_ref: '-INC00000001' }, '-INC00000001', 'patch with a leading hyphen');
+  await patchRef(referenced, { external_ref: '  CHG00000001\t\n' }, 'CHG00000001', 'patch trims');
+  await patchRef(referenced, { external_ref: 'CHG00000001' }, 'CHG00000001', 'patch the same value again');
+  await patchRef(referenced, { priority: 1 }, 'CHG00000001', 'patch without the field');
+  await patchRef(referenced, { external_ref: '' }, undefined, 'patch clears with an empty string');
+  await patchRef(referenced, { external_ref: 'x'.repeat(128) }, 'x'.repeat(128), 'patch with 128 characters');
+
+  // What the input schemas refuse never reaches br.
+  const countBefore = (await listBeads()).length;
+  for (const [what, value] of [['129 characters', 'x'.repeat(129)], ['a NUL', 'STRY\u000000000009'], ['a line feed', 'STRY\n00000009']]) {
+    for (const [verb, response] of [
+      ['patch', await send(`/${referenced}`, 'PATCH', { external_ref: value })],
+      ['create', await send('', 'POST', { title: 'never made', external_ref: value })],
+    ]) {
+      const body = await response.json();
+      assert.equal(response.status, 400, `${verb} with ${what}: ${JSON.stringify(body)}`);
+      assert.equal(body.code, 'invalid_input', `${verb} with ${what}: ${JSON.stringify(body)}`);
+    }
+    await checkRef(referenced, 'x'.repeat(128), `refused ${what}`);
+  }
+
+  // One reference names one bead: br refuses the second, and its message reaches the client.
+  const owner = await createRef('owner of the reference', 'INC00000002');
+  const latecomer = await createRef('latecomer');
+  for (const [verb, response] of [
+    ['patch', await send(`/${latecomer}`, 'PATCH', { title: 'taken over', external_ref: 'INC00000002' })],
+    ['create', await send('', 'POST', { title: 'never made', external_ref: 'INC00000002' })],
+  ]) {
+    const body = await response.json();
+    assert.equal(response.status, 400, `duplicate ${verb}: ${JSON.stringify(body)}`);
+    assert.ok(body.error.includes(owner), `duplicate ${verb} message names the first bead ${owner}: ${body.error}`);
+  }
+  assert.equal(show(latecomer).title, 'latecomer', 'a refused duplicate changes nothing on the second bead');
+  await checkRef(latecomer, undefined, 'refused duplicate');
+  await checkRef(owner, 'INC00000002', 'the first bead keeps its reference');
+  assert.equal((await listBeads()).length, countBefore + 2, 'only the owner and the latecomer were created');
 } finally {
   await fetch(`${base}/api/config`, { method: 'PUT', headers: json, body: JSON.stringify({ humanActor: configBefore.humanActor }) });
   if (writeProjectId) await fetch(`${base}/api/projects/${writeProjectId}`, { method: 'DELETE' });
@@ -269,4 +346,4 @@ try {
   if (projectId) await fetch(`${base}/api/projects/${projectId}`, { method: 'DELETE' });
   fs.rmSync(dir, { recursive: true, force: true });
 }
-console.log('PASS br store: list, detail, 404, doctor, writes with actor, refused gate and change stream on a br tracker');
+console.log('PASS br store: list, detail, 404, doctor, writes with actor, external_ref, refused gate and change stream on a br tracker');
