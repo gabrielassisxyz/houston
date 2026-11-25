@@ -150,7 +150,7 @@ func runServe(ctx context.Context, stdout, stderr io.Writer, cfg *config.NotesCo
 	if err != nil {
 		_ = g.Close()
 		_ = release()
-		fmt.Fprintf(stderr, "\nAnother houston is probably already listening on %s. Find it with:\n    ss -ltnp 'sport = :%d'\nthen stop it, or serve on another address with --addr.\n\n", addr, cfg.Server.Port)
+		fmt.Fprintf(stderr, "\nAnother houston is probably already listening on %s. Find it with:\n    lsof -nP -iTCP:%d -sTCP:LISTEN\nthen stop it, or serve on another address with --addr.\n\n", addr, cfg.Server.Port)
 		return fmt.Errorf("houston serve: cannot listen on %s: %w", addr, err)
 	}
 	srv := &http.Server{
