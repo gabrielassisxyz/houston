@@ -650,9 +650,9 @@ func TestE2E_AE5_DeleteTombstoneAndHistory(t *testing.T) {
 	}
 	t.Logf("step: ae5-target hidden from FTS search")
 
-	// Assert: inbound links degraded to dangling.
+	// Assert: inbound links degraded to dangling (stored under the normalized lower-case key).
 	waitFor(t, 3*time.Second, "inbound links degraded to dangling", func() bool {
-		return countDanglingByTarget(t, h.g, "AE5 Target") > 0 || countDanglingLinks(t, h.g, "ae5-linker") > 0
+		return countDanglingByTarget(t, h.g, "ae5 target") > 0
 	})
 	t.Logf("step: inbound links degraded to dangling_links rows")
 

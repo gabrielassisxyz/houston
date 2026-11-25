@@ -487,7 +487,7 @@ func (r *Reconciler) FlushExpired(ctx context.Context) (tombstoned int, err erro
 	for _, pd := range expired {
 		author := nodes.Author{Name: "human"}
 		txErr := r.g.DoWrite(ctx, func(tx *graph.WriteTx) error {
-			return nodes.SoftDeleteNoteTx(ctx, tx, pd.nodeID, pd.stem, pd.title, author)
+			return nodes.SoftDeleteNoteTx(ctx, tx, pd.nodeID, pd.relPath, pd.title, author)
 		})
 		if txErr != nil {
 			// If the node is already gone (e.g. concurrent revive), skip
@@ -581,7 +581,7 @@ func (r *Reconciler) OnCreate(ctx context.Context, absPath string) error {
 			}
 
 			// Promote any dangling links that now point here
-			keys := r.danglingKeysFor(title, absPath)
+			keys := r.danglingKeysFor(pending.nodeID, title, absPath)
 			p, err := wikilink.PromoteDanglingInTx(ctx, tx, pending.nodeID, keys...)
 			if err != nil {
 				return fmt.Errorf("PromoteDanglingInTx (move): %w", err)
@@ -675,7 +675,7 @@ func (r *Reconciler) OnCreate(ctx context.Context, absPath string) error {
 					return fmt.Errorf("UpdateNote (revive): %w", err)
 				}
 
-				keys := r.danglingKeysFor(title, absPath)
+				keys := r.danglingKeysFor(noteID, title, absPath)
 				p, err := wikilink.PromoteDanglingInTx(ctx, tx, noteID, keys...)
 				if err != nil {
 					return fmt.Errorf("PromoteDanglingInTx (revive): %w", err)
@@ -730,7 +730,7 @@ func (r *Reconciler) OnCreate(ctx context.Context, absPath string) error {
 		}
 
 		// Promote any previously-dangling links pointing at this note
-		keys := r.danglingKeysFor(title, absPath)
+		keys := r.danglingKeysFor(noteID, title, absPath)
 		p, err := wikilink.PromoteDanglingInTx(ctx, tx, noteID, keys...)
 		if err != nil {
 			return fmt.Errorf("PromoteDanglingInTx: %w", err)
@@ -782,7 +782,7 @@ func (r *Reconciler) adoptNote(
 		if _, err := r.resolver.ResolveInTx(ctx, tx, noteID, body); err != nil {
 			return fmt.Errorf("ResolveInTx (adopt): %w", err)
 		}
-		p, err := wikilink.PromoteDanglingInTx(ctx, tx, noteID, r.danglingKeysFor(title, absPath)...)
+		p, err := wikilink.PromoteDanglingInTx(ctx, tx, noteID, r.danglingKeysFor(noteID, title, absPath)...)
 		if err != nil {
 			return fmt.Errorf("PromoteDanglingInTx (adopt): %w", err)
 		}
@@ -851,6 +851,7 @@ func (r *Reconciler) OnChange(ctx context.Context, absPath string) error {
 	body := extractBody(raw)
 	contentHash := HashBytes(raw)
 
+	var promoted int
 	var displaced *pendingDelete
 	err = r.g.DoWrite(ctx, func(tx *graph.WriteTx) error {
 		n, err := noteFromFile(ctx, tx, fm.ID, fm, title, body)
@@ -866,6 +867,17 @@ func (r *Reconciler) OnChange(ctx context.Context, absPath string) error {
 			return fmt.Errorf("ResolveInTx: %w", err)
 		}
 
+		// Promote any dangling links that now point here. Notes the service
+		// creates itself can have their node created before the watcher event
+		// arrives as a change, so promoting only in OnCreate left links to
+		// them permanently dangling.
+		keys := r.danglingKeysFor(fm.ID, title, absPath)
+		p, err := wikilink.PromoteDanglingInTx(ctx, tx, fm.ID, keys...)
+		if err != nil {
+			return fmt.Errorf("PromoteDanglingInTx: %w", err)
+		}
+		promoted = p
+
 		// Refresh path cache
 		displaced, err = claimPathInTx(tx, fm.ID, relPath, contentHash)
 		return err
@@ -876,12 +888,14 @@ func (r *Reconciler) OnChange(ctx context.Context, absPath string) error {
 	r.pathClaimed(fm.ID, displaced)
 
 	r.eventsProcessed.Add(1)
+	r.danglingPromoted.Add(int64(promoted))
 
 	slog.Info("reconcile: change",
 		"event", "change",
 		"path", absPath,
 		"node_id", fm.ID,
 		"decision", "change",
+		"dangling_promoted", promoted,
 	)
 	return nil
 }
@@ -1289,25 +1303,20 @@ func extractBody(raw []byte) string {
 	return string(bytes.TrimLeft(raw[fm.End:], "\n\r"))
 }
 
-// danglingKeysFor returns the PromoteKeys for a note: stem and title.
-// Stem is derived from the filename; title is the resolved display title.
-// danglingKeysFor returns every spelling under which this note could have been
-// linked before it existed: the file stem, the title, and the vault-relative path
-// without its extension.
+// danglingKeysFor returns every normalized spelling under which this note could
+// have been linked before it existed: the file stem, the title, the
+// vault-relative path without its extension, and the note id.
 //
-// All three, because the resolver stores the target text exactly as it was written
-// and cannot know which spelling it is. Offering only the stem lost a link whose
-// text was the title, which happens whenever a file name cannot carry the title -
-// a colon is enough. Offering stem and title still lost a link written as the
-// vault-relative path, because that diverges in the KEY rather than in the kind,
-// which is why matching by key alone was not sufficient on its own.
-func (r *Reconciler) danglingKeysFor(title, absPath string) []wikilink.PromoteKey {
+// All four go through wikilink.NormalizeTarget so promotion matches the exact
+// normalized keys written by the resolver and by softDeleteNote.
+func (r *Reconciler) danglingKeysFor(noteID, title, absPath string) []wikilink.PromoteKey {
 	base := filepath.Base(absPath)
 	stem := strings.TrimSuffix(base, filepath.Ext(base))
 
 	seen := map[string]bool{}
 	var keys []wikilink.PromoteKey
-	add := func(k string) {
+	add := func(raw string) {
+		k := wikilink.NormalizeTarget(raw)
 		if k == "" || seen[k] {
 			return
 		}
@@ -1318,6 +1327,7 @@ func (r *Reconciler) danglingKeysFor(title, absPath string) []wikilink.PromoteKe
 	add(title)
 	rel := r.relPath(absPath)
 	add(strings.TrimSuffix(rel, filepath.Ext(rel)))
+	add(noteID)
 	return keys
 }
 

@@ -360,7 +360,7 @@ func TestColdStart_SoftDeleteCachedForgetsDeadPath(t *testing.T) {
 		}, nodes.Author{Name: "test"}); err != nil {
 			return err
 		}
-		if err := nodes.SoftDeleteNoteTx(ctx, tx, "ghost-uuid", "ghost", "Ghost", nodes.Author{Name: "test"}); err != nil {
+		if err := nodes.SoftDeleteNoteTx(ctx, tx, "ghost-uuid", "ghost.md", "Ghost", nodes.Author{Name: "test"}); err != nil {
 			return err
 		}
 		_, err := tx.Exec(
