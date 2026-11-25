@@ -15,8 +15,8 @@ import { Sheet, SheetContent, SheetDescription, SheetTitle, SheetTrigger } from 
 import { Menu } from "lucide-react";
 
 export interface SidebarProps {
-  view: View;
-  onView: (v: View) => void;
+  view?: View;
+  onView?: (v: View) => void;
   kind?: "bd" | "br" | "demo";
   projectId: string;
   live?: boolean;
@@ -80,9 +80,9 @@ export function Sidebar({
         {(views ?? navViews(!!meta?.gamification)).map((n) => {
           const active = view === n.key;
           return (
-            <button
-              key={n.key}
-              onClick={() => onView(n.key)}
+              <button
+                key={n.key}
+                onClick={() => onView?.(n.key)}
               aria-current={active ? "page" : undefined}
               className={cn(
                 "flex w-full items-center gap-[10px] rounded-[9px] px-[10px] py-2 text-left text-[13.5px] transition-colors",
@@ -168,7 +168,7 @@ export function MobileSidebar(props: Omit<SidebarProps, "mobile" | "onProjectNav
   const { onView } = props;
   const chooseView = React.useCallback(
     (next: View) => {
-      onView(next);
+      onView?.(next);
       setOpen(false);
     },
     [onView],
