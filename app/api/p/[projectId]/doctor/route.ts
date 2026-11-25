@@ -13,7 +13,11 @@ export async function GET(_req: Request, { params }: { params: Promise<{ project
     const info = await store.doctor();
     return ok({
       ...info,
-      project: project ? { id: project.id, name: project.name, path: project.path } : null,
+      project: project
+        ? "pipelineRepo" in project && project.pipelineRepo
+          ? { id: project.id, name: project.name, path: project.path, pipelineRepo: project.pipelineRepo }
+          : { id: project.id, name: project.name, path: project.path }
+        : null,
       config: cfg,
     });
   } catch (e) {

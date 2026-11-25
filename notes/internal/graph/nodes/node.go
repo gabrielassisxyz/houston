@@ -18,6 +18,12 @@ type DiffableNode interface {
 	DiffBody(prev NodeSpec) []byte // diff JSON or nil
 }
 
+// NodeRefser is the optional interface a node implements when it carries
+// refs rows beside tag rows. Note implements it beside NodeTags.
+type NodeRefser interface {
+	NodeRefs() []string
+}
+
 // FTSFields groups what goes into the FTS virtual table.
 type FTSFields struct {
 	Title string

@@ -3,9 +3,10 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Plus, Trash2, FlaskConical, FolderGit2, Layers, CalendarRange, Loader2 } from "lucide-react";
+import { Plus, Trash2, FlaskConical, FolderGit2, Layers, CalendarRange, Loader2, Briefcase } from "lucide-react";
 import { Icon } from "@/components/icons";
 import { useTheme } from "@/components/theme-provider";
+import { useCapabilities } from "@/hooks/use-capabilities";
 import { useProjects } from "@/hooks/use-projects";
 import { FolderBrowserModal } from "@/components/folder-browser-modal";
 import { api, type ProjectInfo } from "@/lib/api-client";
@@ -18,6 +19,8 @@ export function Launcher() {
   const projects = data?.projects ?? [];
   const demo = projects.find((p) => p.id === "demo");
   const real = projects.filter((p) => p.id !== "demo");
+  const caps = useCapabilities();
+  const showWork = !!caps.data?.workDashboardUrl;
 
   return (
     <div className="flex h-full flex-col overflow-y-auto bg-background text-foreground">
@@ -67,6 +70,7 @@ export function Launcher() {
             {real.length >= 2 && <AllProjectsCard />}
             {real.length >= 1 && <SprintsCard />}
             {demo && <DemoCard />}
+            {showWork && <WorkCard />}
             {real.map((p) => (
               <ProjectCard key={p.id} project={p} />
             ))}
@@ -90,15 +94,18 @@ export function Launcher() {
 
 function CardShell({
   onClick,
+  lang,
   children,
 }: {
   onClick: () => void;
+  lang?: string;
   children: React.ReactNode;
 }) {
   return (
     <div
       role="button"
       tabIndex={0}
+      lang={lang}
       onClick={onClick}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") onClick();
@@ -165,6 +172,26 @@ function DemoCard() {
       </div>
       <div className="text-[12px] text-[var(--text-3)]">
         Seeded sample data — explore every view without a tracker installed.
+      </div>
+    </CardShell>
+  );
+}
+
+function WorkCard() {
+  const router = useRouter();
+  return (
+    <CardShell onClick={() => router.push("/work")} lang="pt-BR">
+      <div className="flex items-center gap-[10px]">
+        <div className="flex h-[30px] w-[30px] items-center justify-center rounded-[9px] bg-[var(--brand-weak)] text-[var(--brand)]">
+          <Briefcase size={16} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[14px] font-[620]">Trabalho</div>
+          <div className="text-[11px] text-[var(--text-3)]">Painel do trabalho</div>
+        </div>
+      </div>
+      <div className="text-[12px] text-[var(--text-3)]">
+        Acompanhe o painel externo sem sair do Houston.
       </div>
     </CardShell>
   );

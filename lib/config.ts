@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import { checkObsidianVault } from "./config-values";
 import { checkLoopbackServiceUrl } from "./loopback-url";
 import { checkWorkDashboardUrl } from "./loopback-url";
-import { checkGithubOrgs, checkServiceNowHost, checkSnapshotPath } from "./config-values";
+import { checkGithubOrgs, checkServiceNowHost, checkSnapshotPath, checkPipelineRepo } from "./config-values";
 
 /**
  * Local app config (NOT stored in beads). Lives as a small JSON file under the
@@ -25,6 +25,11 @@ export interface ProjectEntry {
   /** ISO timestamps. */
   addedAt: string;
   lastOpened: string;
+  /**
+   * Pipeline repository the delivery pipeline runs for, as `owner/name` in
+   * lowercase. Absent when unset; `null` is never stored or returned.
+   */
+  pipelineRepo?: string;
 }
 
 export interface AppConfig {
@@ -251,13 +256,22 @@ function sanitizeProjects(input: unknown): ProjectEntry[] {
     if (typeof e.id !== "string" || typeof e.path !== "string") continue;
     if (e.id === DEMO_PROJECT.id || seen.has(e.id)) continue;
     seen.add(e.id);
-    out.push({
+    const entry: ProjectEntry = {
       id: e.id,
       path: e.path,
       name: typeof e.name === "string" && e.name ? e.name : path.basename(e.path) || e.path,
       addedAt: typeof e.addedAt === "string" ? e.addedAt : new Date().toISOString(),
       lastOpened: typeof e.lastOpened === "string" ? e.lastOpened : new Date().toISOString(),
-    });
+    };
+    if (e.pipelineRepo !== undefined) {
+      const checked = checkPipelineRepo(e.pipelineRepo);
+      if (checked.ok) {
+        entry.pipelineRepo = checked.value;
+      } else {
+        console.warn(`[houston] config: pipelineRepo ignored: ${checked.reason}`);
+      }
+    }
+    out.push(entry);
   }
   return out;
 }
@@ -602,11 +616,32 @@ export function touchProject(id: string): void {
   }
 }
 
-export function renameProject(id: string, name: string): ProjectEntry | undefined {
+export function updateProject(
+  id: string,
+  patch: { name?: string; pipelineRepo?: string },
+): ProjectEntry | undefined {
   const cfg = getConfig();
   const p = cfg.projects.find((x) => x.id === id);
   if (!p) return undefined;
-  p.name = name;
+  let nextRepo: string | undefined;
+  let clearRepo = false;
+  if (patch.pipelineRepo !== undefined) {
+    if (patch.pipelineRepo === "") {
+      clearRepo = true;
+    } else {
+      const checked = checkPipelineRepo(patch.pipelineRepo);
+      if (!checked.ok) {
+        throw new ConfigError(checked.reason, "invalid_config");
+      }
+      nextRepo = checked.value;
+    }
+  }
+  if (patch.name !== undefined) p.name = patch.name;
+  if (clearRepo) {
+    delete p.pipelineRepo;
+  } else if (nextRepo !== undefined) {
+    p.pipelineRepo = nextRepo;
+  }
   persist(cfg);
   return p;
 }

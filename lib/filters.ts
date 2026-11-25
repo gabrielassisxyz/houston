@@ -5,7 +5,7 @@ import { projectOf } from "./aggregate";
 /**
  * Shared bead filter model used by both the Board and List views. Every facet is
  * multi-select; an empty array means "no constraint" (show all). `search` matches
- * id / title / assignee.
+ * id / title / assignee / labels / external_ref.
  */
 export interface Filters {
   status: string[];
@@ -186,7 +186,8 @@ export function matchesFilters(b: Bead, f: Filters, humanAllowlist: string[]): b
       b.title.toLowerCase().includes(q) ||
       b.id.toLowerCase().includes(q) ||
       (b.assignee ?? "").toLowerCase().includes(q) ||
-      (b.labels ?? []).some((l) => l.toLowerCase().includes(q))
+      (b.labels ?? []).some((l) => l.toLowerCase().includes(q)) ||
+      (b.external_ref ?? "").toLowerCase().includes(q)
     )
   )
     return false;
