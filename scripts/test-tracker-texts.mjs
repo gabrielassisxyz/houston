@@ -160,6 +160,9 @@ async function openScenario(url, { liveStream = false, holdBeads = false } = {})
     if (path.endsWith("/activity")) {
       return route.fulfill({ json: { items: [] } });
     }
+    if (path === "/api/capabilities") {
+      return route.fulfill({ json: { workDashboardUrl: null } });
+    }
     state.unexpected.push(path);
     return route.fulfill({ json: {} });
   });
