@@ -80,14 +80,32 @@ func (m *model) apply(t *rapid.T, op int) {
 		if !ok {
 			return // skip if no alive nodes
 		}
-		title := rapid.String().Draw(t, "newTitle")
-		body := rapid.String().Draw(t, "newBody")
-		tagCount := rapid.IntRange(0, 3).Draw(t, "newTagCount")
+		prev := m.nodes[id]
+		var title, body string
 		var tagSlice []string
-		for i := 0; i < tagCount; i++ {
-			tag := rapid.StringMatching(`[a-z]+`).Draw(t, fmt.Sprintf("newTag%d", i))
-			if tag != "" {
-				tagSlice = append(tagSlice, tag)
+		// Half the updates repeat a field of the current state, and some
+		// repeat all of it, with the tags in another order: an update that
+		// changes nothing must add no revision.
+		if rapid.Bool().Draw(t, "sameTitle") {
+			title = prev.title
+		} else {
+			title = rapid.String().Draw(t, "newTitle")
+		}
+		if rapid.Bool().Draw(t, "sameBody") {
+			body = prev.body
+		} else {
+			body = rapid.String().Draw(t, "newBody")
+		}
+		if rapid.Bool().Draw(t, "sameTags") {
+			tagSlice = append(tagSlice, prev.tags...)
+			sort.Sort(sort.Reverse(sort.StringSlice(tagSlice)))
+		} else {
+			tagCount := rapid.IntRange(0, 3).Draw(t, "newTagCount")
+			for i := 0; i < tagCount; i++ {
+				tag := rapid.StringMatching(`[a-z]+`).Draw(t, fmt.Sprintf("newTag%d", i))
+				if tag != "" {
+					tagSlice = append(tagSlice, tag)
+				}
 			}
 		}
 		c := nodes.Capture{ID: id, Title: title, Body: body, Tags: tagSlice}
@@ -97,8 +115,11 @@ func (m *model) apply(t *rapid.T, op int) {
 		if err != nil {
 			t.Fatalf("update: %v", err)
 		}
-		m.nodes[id] = captureMirror{title: title, body: body, tags: dedupStrings(tagSlice), alive: true}
-		m.revCount[id]++
+		next := captureMirror{title: title, body: body, tags: dedupStrings(tagSlice), alive: true}
+		if title != prev.title || body != prev.body || !sameTagSet(next.tags, prev.tags) {
+			m.revCount[id]++
+		}
+		m.nodes[id] = next
 
 	case 2: // delete
 		id, ok := m.pickAliveNode(t)
@@ -355,6 +376,23 @@ func (m *model) pickEdgeID(t *rapid.T) string {
 	}
 	idx := rapid.IntRange(0, len(ids)-1).Draw(t, "edgeIdx")
 	return ids[idx]
+}
+
+// sameTagSet compares two de-duplicated tag lists without regard to order.
+func sameTagSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[string]struct{}, len(a))
+	for _, s := range a {
+		set[s] = struct{}{}
+	}
+	for _, s := range b {
+		if _, ok := set[s]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func dedupStrings(in []string) []string {
