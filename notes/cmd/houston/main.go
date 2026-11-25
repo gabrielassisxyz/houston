@@ -22,22 +22,6 @@ import (
 	"github.com/gabrielassisxyz/houston/notes/internal/logging"
 )
 
-const (
-	exitOK    = 0
-	exitError = 1
-	exitUsage = 2
-)
-
-// usageError marks a wrong invocation (unknown command or flag, bad flag
-// value): main maps it to exit 2, every other error to exit 1.
-type usageError struct{ msg string }
-
-func (e usageError) Error() string { return e.msg }
-
-func usagef(format string, args ...any) usageError {
-	return usageError{msg: fmt.Sprintf(format, args...)}
-}
-
 func main() {
 	// Logging through internal/logging, from HOUSTON_LOG_LEVEL (default info),
 	// before any verb runs so every path writes through the same handler.
@@ -51,12 +35,15 @@ func main() {
 	defer stop()
 
 	if err := dispatch(ctx, os.Args[1:], os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		var ue usageError
-		if errors.As(err, &ue) {
-			os.Exit(exitUsage)
+		// A verb that already wrote its own output (e.g. preflight with an
+		// error report) signals failure only through the exit code: print
+		// nothing more, or the output is duplicated.
+		var reported alreadyReported
+		if errors.As(err, &reported) {
+			os.Exit(exitCode(err))
 		}
-		os.Exit(exitError)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(exitCode(err))
 	}
 }
 
@@ -143,6 +130,7 @@ Usage:
 Commands:
   serve         Start the notes service
   health        Print what a running service answers
+  preflight     Report what the first index would change, writing nothing
   help          Print this usage
 
 Run 'houston help <command>' for details.
@@ -174,6 +162,20 @@ Usage:
   --server <url>  Check this server instead of the configured one. Accepts
                   host:port or a full URL; the scheme defaults to http://.
   --json          Emit the API's {"status","vaultRoot","vaultLabel"} verbatim.
+`
+}
+
+func preflightUsage() string {
+	return `houston preflight - report what the first index would change
+
+Usage:
+  houston [--config <path>] preflight [--json]
+
+Walks the vault with the reconciler's own parser and note-file helpers,
+prints one line per finding and a count per kind, and writes nothing.
+Exits 0 when there is no error, 1 otherwise.
+
+  --json          Emit {"errors","notices","counts","findings"} as one document.
 `
 }
 
@@ -216,6 +218,8 @@ func dispatch(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		return runServeCmd(ctx, stdout, stderr, configPath, serverFlag, asJSON, args[1:])
 	case "health":
 		return runHealthCmd(stdout, configPath, serverFlag, asJSON, args[1:])
+	case "preflight":
+		return runPreflightCmd(stdout, configPath, serverFlag, asJSON, args[1:])
 	default:
 		if strings.HasPrefix(args[0], "-") {
 			return usagef("houston: unknown flag %q - run: houston help", args[0])
@@ -237,6 +241,8 @@ func helpTopic(args []string) (string, bool) {
 					return serveUsage(), true
 				case "health":
 					return healthUsage(), true
+				case "preflight":
+					return preflightUsage(), true
 				}
 			}
 			return usage(), true
@@ -248,6 +254,8 @@ func helpTopic(args []string) (string, bool) {
 					return serveUsage(), true
 				case "health":
 					return healthUsage(), true
+				case "preflight":
+					return preflightUsage(), true
 				}
 			}
 			return usage(), true

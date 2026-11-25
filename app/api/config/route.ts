@@ -11,6 +11,11 @@ const patchSchema = z.object({
   pollIntervalMs: z.number().int().min(1000).max(300000).optional(),
   gamification: z.boolean().optional(),
   workDashboardUrl: z.string().nullable().optional(),
+  snapshotPath: z.string().nullable().optional(),
+  serviceNowHost: z.string().nullable().optional(),
+  githubOrgs: z.array(z.string()).nullable().optional(),
+  notesServiceUrl: z.string().nullable().optional(),
+  obsidianVault: z.string().nullable().optional(),
 });
 
 export async function GET() {
@@ -20,10 +25,23 @@ export async function GET() {
 export async function PUT(req: Request) {
   try {
     const patch = patchSchema.parse(await req.json());
-    const next =
-      patch.workDashboardUrl === "" || patch.workDashboardUrl === null
-        ? saveConfig({ ...patch, workDashboardUrl: null })
-        : saveConfig(patch);
+    const normalized = {
+      ...patch,
+      ...(patch.workDashboardUrl === "" || patch.workDashboardUrl === null
+        ? { workDashboardUrl: null }
+        : {}),
+      ...(patch.snapshotPath === "" || patch.snapshotPath === null ? { snapshotPath: null } : {}),
+      ...(patch.serviceNowHost === "" || patch.serviceNowHost === null
+        ? { serviceNowHost: null }
+        : {}),
+      ...(patch.notesServiceUrl === "" || patch.notesServiceUrl === null
+        ? { notesServiceUrl: null }
+        : {}),
+      ...(patch.obsidianVault === "" || patch.obsidianVault === null
+        ? { obsidianVault: null }
+        : {}),
+    };
+    const next = saveConfig(normalized);
     // Actor changes affect write attribution; drop cached stores so the next
     // write picks up the new value.
     resetStore();

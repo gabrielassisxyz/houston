@@ -4,7 +4,10 @@ import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import { checkObsidianVault } from "./config-values";
+import { checkLoopbackServiceUrl } from "./loopback-url";
 import { checkWorkDashboardUrl } from "./loopback-url";
+import { checkGithubOrgs, checkServiceNowHost, checkSnapshotPath, checkPipelineRepo } from "./config-values";
 
 /**
  * Local app config (NOT stored in beads). Lives as a small JSON file under the
@@ -22,6 +25,11 @@ export interface ProjectEntry {
   /** ISO timestamps. */
   addedAt: string;
   lastOpened: string;
+  /**
+   * Pipeline repository the delivery pipeline runs for, as `owner/name` in
+   * lowercase. Absent when unset; `null` is never stored or returned.
+   */
+  pipelineRepo?: string;
 }
 
 export interface AppConfig {
@@ -47,15 +55,49 @@ export interface AppConfig {
    * never stored or returned.
    */
   workDashboardUrl?: string;
+  /**
+   * Path of the snapshot file a local collector writes on the work machine.
+   * Absent when unset; `null` is never stored or returned.
+   */
+  snapshotPath?: string;
+  /**
+   * Bare host name of the ticket instance links may point at. Absent when
+   * unset; `null` is never stored or returned.
+   */
+  serviceNowHost?: string;
+  /**
+   * Lowercase GitHub owner names pipeline links may be built for. Absent
+   * when unset; `null` is never stored or returned. An empty list is stored.
+   */
+  githubOrgs?: string[];
+  /**
+   * Root address of the notes service, which only the server calls. Absent
+   * when unset; `null` is never stored or returned.
+   */
+  notesServiceUrl?: string;
+  /**
+   * Name of the Obsidian vault that holds the notes, as pages need it to open
+   * one. Absent when unset; `null` is never stored or returned.
+   */
+  obsidianVault?: string;
 }
 
-/** Patch type for `saveConfig`: `workDashboardUrl` is `string | null`. */
+/**
+ * Patch type for `saveConfig`: `workDashboardUrl`, `snapshotPath`,
+ * `serviceNowHost`, `notesServiceUrl` and `obsidianVault` are `string | null`,
+ * `githubOrgs` is `string[] | null`, with `null` removing the key.
+ */
 export interface SaveConfigPatch {
   humanActor?: string;
   humanAllowlist?: string[];
   pollIntervalMs?: number;
   gamification?: boolean;
   workDashboardUrl?: string | null;
+  snapshotPath?: string | null;
+  serviceNowHost?: string | null;
+  githubOrgs?: string[] | null;
+  notesServiceUrl?: string | null;
+  obsidianVault?: string | null;
 }
 
 /**
@@ -214,13 +256,22 @@ function sanitizeProjects(input: unknown): ProjectEntry[] {
     if (typeof e.id !== "string" || typeof e.path !== "string") continue;
     if (e.id === DEMO_PROJECT.id || seen.has(e.id)) continue;
     seen.add(e.id);
-    out.push({
+    const entry: ProjectEntry = {
       id: e.id,
       path: e.path,
       name: typeof e.name === "string" && e.name ? e.name : path.basename(e.path) || e.path,
       addedAt: typeof e.addedAt === "string" ? e.addedAt : new Date().toISOString(),
       lastOpened: typeof e.lastOpened === "string" ? e.lastOpened : new Date().toISOString(),
-    });
+    };
+    if (e.pipelineRepo !== undefined) {
+      const checked = checkPipelineRepo(e.pipelineRepo);
+      if (checked.ok) {
+        entry.pipelineRepo = checked.value;
+      } else {
+        console.warn(`[houston] config: pipelineRepo ignored: ${checked.reason}`);
+      }
+    }
+    out.push(entry);
   }
   return out;
 }
@@ -322,6 +373,51 @@ export function getConfig(): AppConfig {
     }
   }
 
+  if (onDisk && (onDisk as Partial<AppConfig>).snapshotPath !== undefined) {
+    const checked = checkSnapshotPath((onDisk as Partial<AppConfig>).snapshotPath);
+    if (checked.ok) {
+      merged.snapshotPath = checked.value;
+    } else {
+      console.warn(`[houston] config: snapshotPath ignored: ${checked.reason}`);
+    }
+  }
+
+  if (onDisk && (onDisk as Partial<AppConfig>).serviceNowHost !== undefined) {
+    const checked = checkServiceNowHost((onDisk as Partial<AppConfig>).serviceNowHost);
+    if (checked.ok) {
+      merged.serviceNowHost = checked.value;
+    } else {
+      console.warn(`[houston] config: serviceNowHost ignored: ${checked.reason}`);
+    }
+  }
+
+  if (onDisk && (onDisk as Partial<AppConfig>).githubOrgs !== undefined) {
+    const checked = checkGithubOrgs((onDisk as Partial<AppConfig>).githubOrgs);
+    if (checked.ok) {
+      merged.githubOrgs = checked.value;
+    } else {
+      console.warn(`[houston] config: githubOrgs ignored: ${checked.reason}`);
+    }
+  }
+
+  if (onDisk && onDisk.notesServiceUrl !== undefined) {
+    const checked = checkLoopbackServiceUrl(onDisk.notesServiceUrl);
+    if (checked.ok) {
+      merged.notesServiceUrl = checked.url;
+    } else {
+      console.warn(`[houston] config: notesServiceUrl ignored: ${checked.reason}`);
+    }
+  }
+
+  if (onDisk && onDisk.obsidianVault !== undefined) {
+    const checked = checkObsidianVault(onDisk.obsidianVault);
+    if (checked.ok) {
+      merged.obsidianVault = checked.value;
+    } else {
+      console.warn(`[houston] config: obsidianVault ignored: ${checked.reason}`);
+    }
+  }
+
   // One-time migration: back-fill the registry from the legacy single repoPath
   // (or BEADS_REPO / cwd) when no projects array exists yet.
   let migrated = false;
@@ -355,7 +451,7 @@ export function closeActor(assignee: string | null | undefined): string {
   return assignee && assignee !== humanActor && assignee === osUserName() ? assignee : humanActor;
 }
 
-/** Update global settings (actor / allowlist / poll / dashboard). Project registry has its own mutators. */
+/** Update global settings (actor / allowlist / poll / dashboard / chain / notes). Project registry has its own mutators. */
 export function saveConfig(patch: SaveConfigPatch): AppConfig {
   const current = getConfig();
   let normalisedUrl: string | undefined;
@@ -365,6 +461,46 @@ export function saveConfig(patch: SaveConfigPatch): AppConfig {
       throw new ConfigError(checked.reason, "invalid_config");
     }
     normalisedUrl = checked.url;
+  }
+  let normalisedSnapshot: string | undefined;
+  if (patch.snapshotPath !== undefined && patch.snapshotPath !== null) {
+    const checked = checkSnapshotPath(patch.snapshotPath);
+    if (!checked.ok) {
+      throw new ConfigError(checked.reason, "invalid_config");
+    }
+    normalisedSnapshot = checked.value;
+  }
+  let normalisedHost: string | undefined;
+  if (patch.serviceNowHost !== undefined && patch.serviceNowHost !== null) {
+    const checked = checkServiceNowHost(patch.serviceNowHost);
+    if (!checked.ok) {
+      throw new ConfigError(checked.reason, "invalid_config");
+    }
+    normalisedHost = checked.value;
+  }
+  let normalisedOrgs: string[] | undefined;
+  if (patch.githubOrgs !== undefined && patch.githubOrgs !== null) {
+    const checked = checkGithubOrgs(patch.githubOrgs);
+    if (!checked.ok) {
+      throw new ConfigError(checked.reason, "invalid_config");
+    }
+    normalisedOrgs = checked.value;
+  }
+  let normalisedNotesUrl: string | undefined;
+  if (patch.notesServiceUrl !== undefined && patch.notesServiceUrl !== null) {
+    const checked = checkLoopbackServiceUrl(patch.notesServiceUrl);
+    if (!checked.ok) {
+      throw new ConfigError(checked.reason, "invalid_config");
+    }
+    normalisedNotesUrl = checked.url;
+  }
+  let normalisedVault: string | undefined;
+  if (patch.obsidianVault !== undefined && patch.obsidianVault !== null) {
+    const checked = checkObsidianVault(patch.obsidianVault);
+    if (!checked.ok) {
+      throw new ConfigError(checked.reason, "invalid_config");
+    }
+    normalisedVault = checked.value;
   }
   const next: AppConfig = { ...current };
   if (patch.humanActor !== undefined) next.humanActor = patch.humanActor;
@@ -378,9 +514,51 @@ export function saveConfig(patch: SaveConfigPatch): AppConfig {
       next.workDashboardUrl = normalisedUrl as string;
     }
   }
+  if (patch.snapshotPath !== undefined) {
+    if (patch.snapshotPath === null) {
+      delete next.snapshotPath;
+    } else {
+      next.snapshotPath = normalisedSnapshot as string;
+    }
+  }
+  if (patch.serviceNowHost !== undefined) {
+    if (patch.serviceNowHost === null) {
+      delete next.serviceNowHost;
+    } else {
+      next.serviceNowHost = normalisedHost as string;
+    }
+  }
+  if (patch.githubOrgs !== undefined) {
+    if (patch.githubOrgs === null) {
+      delete next.githubOrgs;
+    } else {
+      next.githubOrgs = normalisedOrgs as string[];
+    }
+  }
+  if (patch.notesServiceUrl !== undefined) {
+    if (patch.notesServiceUrl === null) {
+      delete next.notesServiceUrl;
+    } else {
+      next.notesServiceUrl = normalisedNotesUrl as string;
+    }
+  }
+  if (patch.obsidianVault !== undefined) {
+    if (patch.obsidianVault === null) {
+      delete next.obsidianVault;
+    } else {
+      next.obsidianVault = normalisedVault as string;
+    }
+  }
   if (patch.humanActor !== undefined) next.humanActorChosen = true;
-  if (patch.workDashboardUrl === null) {
-    persist(next, ["workDashboardUrl"]);
+  const deleteKeys: string[] = [];
+  if (patch.workDashboardUrl === null) deleteKeys.push("workDashboardUrl");
+  if (patch.snapshotPath === null) deleteKeys.push("snapshotPath");
+  if (patch.serviceNowHost === null) deleteKeys.push("serviceNowHost");
+  if (patch.githubOrgs === null) deleteKeys.push("githubOrgs");
+  if (patch.notesServiceUrl === null) deleteKeys.push("notesServiceUrl");
+  if (patch.obsidianVault === null) deleteKeys.push("obsidianVault");
+  if (deleteKeys.length > 0) {
+    persist(next, deleteKeys);
   } else {
     persist(next);
   }
@@ -438,11 +616,32 @@ export function touchProject(id: string): void {
   }
 }
 
-export function renameProject(id: string, name: string): ProjectEntry | undefined {
+export function updateProject(
+  id: string,
+  patch: { name?: string; pipelineRepo?: string },
+): ProjectEntry | undefined {
   const cfg = getConfig();
   const p = cfg.projects.find((x) => x.id === id);
   if (!p) return undefined;
-  p.name = name;
+  let nextRepo: string | undefined;
+  let clearRepo = false;
+  if (patch.pipelineRepo !== undefined) {
+    if (patch.pipelineRepo === "") {
+      clearRepo = true;
+    } else {
+      const checked = checkPipelineRepo(patch.pipelineRepo);
+      if (!checked.ok) {
+        throw new ConfigError(checked.reason, "invalid_config");
+      }
+      nextRepo = checked.value;
+    }
+  }
+  if (patch.name !== undefined) p.name = patch.name;
+  if (clearRepo) {
+    delete p.pipelineRepo;
+  } else if (nextRepo !== undefined) {
+    p.pipelineRepo = nextRepo;
+  }
   persist(cfg);
   return p;
 }

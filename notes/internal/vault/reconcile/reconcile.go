@@ -1072,7 +1072,9 @@ func NoteFromFile(fm *frontmatter.Frontmatter, title, body string) nodes.Note {
 		Origin:     nodes.NormalizeOrigin(fm.Origin),
 		Author:     fm.Author,
 		Permission: fm.Permission,
-		Tags:       fm.Tags,
+		Kind:       nodes.NormalizeNoteKind(fm.Kind),
+		Refs:       []string(fm.Refs),
+		Tags:       []string(fm.Tags),
 	}
 }
 

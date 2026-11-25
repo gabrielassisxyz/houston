@@ -207,4 +207,28 @@ const minimal = { id: 'bd-1', title: 't', status: 'open', issue_type: 'task' };
   }
 }
 
-console.log('PASS external_ref: schema, input schemas, demo store and bd store');
+// ---------------------------------------------------------------- the text filter
+{
+  const load = loader();
+  const { matchesFilters, emptyFilters } = load('filters');
+  const { beadSchema } = load('schema');
+  const bead = (extra) => beadSchema.parse({ ...minimal, title: 'Card', ...extra });
+  const finds = (b, search, facets = {}) => matchesFilters(b, { ...emptyFilters, ...facets, search }, []);
+  const carrying = bead({ external_ref: 'STRY00000001' });
+
+  assert.equal(finds(carrying, 'STRY00000001'), true, 'the filter finds a bead by its reference');
+  assert.equal(finds(carrying, 'ry0000000'), true, 'the filter finds a part of a reference, in any case');
+  assert.equal(finds(carrying, '  stry00000001 '), true, 'the filter ignores blanks around what was typed');
+  assert.equal(finds(carrying, 'STRY00000002'), false, 'another reference does not match');
+  assert.equal(finds(carrying, 'STRY00000001', { status: ['closed'] }), false, 'a matching reference does not override a facet');
+  for (const without of [bead({}), bead({ external_ref: null })]) {
+    const held = JSON.stringify(without.external_ref) ?? 'no key';
+    assert.equal(finds(without, 'STRY00000001'), false, `a bead with ${held} is not found by a reference`);
+    for (const search of ['undefined', 'null']) {
+      assert.equal(finds(without, search), false, `a bead with ${held} does not match "${search}"`);
+    }
+    assert.equal(finds(without, 'card'), true, `a bead with ${held} is still found by its title`);
+  }
+}
+
+console.log('PASS external_ref: schema, input schemas, demo store, bd store and text filter');

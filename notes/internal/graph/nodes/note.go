@@ -71,6 +71,125 @@ type LinkCandidate struct {
 	Snippet string  `json:"snippet"`
 }
 
+// Note kinds. A note indexed before kind existed has no kind in its
+// attributes until its file changes; every read takes a missing or empty
+// kind as KindNota.
+const (
+	NoteKindPlano         = "plano"
+	NoteKindImplementacao = "implementacao"
+	NoteKindEvidencia     = "evidencia"
+	NoteKindNota          = "nota"
+)
+
+// NormalizeNoteKind trims and lower-cases s and maps it onto the four kinds.
+// Anything else, including the empty string, counts as nota.
+func NormalizeNoteKind(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case NoteKindPlano:
+		return NoteKindPlano
+	case NoteKindImplementacao:
+		return NoteKindImplementacao
+	case NoteKindEvidencia:
+		return NoteKindEvidencia
+	case NoteKindNota:
+		return NoteKindNota
+	default:
+		return NoteKindNota
+	}
+}
+
+// nodeRefs returns the refs rows a spec carries, or nil when it implements
+// no NodeRefs. It keeps the chokepoint free of a type switch on every node.
+func nodeRefs(spec NodeSpec) []string {
+	if r, ok := spec.(NodeRefser); ok {
+		return r.NodeRefs()
+	}
+	return nil
+}
+
+// dedupRefs de-duplicates refs by their case-folded text, preserving the
+// first occurrence's trimmed casing and dropping blanks. Tags de-duplicate
+// exactly (dedupStrings); refs cannot, because under COLLATE NOCASE
+// [hou-4kz, HOU-4KZ] would otherwise fail the primary key.
+func dedupRefs(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	var out []string
+	for _, r := range in {
+		t := strings.TrimSpace(r)
+		if t == "" {
+			continue
+		}
+		k := strings.ToLower(t)
+		if _, ok := seen[k]; !ok {
+			seen[k] = struct{}{}
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// diffRefs computes which refs to add and remove when transitioning from prev
+// to next, comparing by case-folded text. A case-only edit is no change, so
+// it keeps its single row.
+func diffRefs(prev, next []string) (add, remove []string) {
+	prevMap := make(map[string]string, len(prev))
+	for _, r := range prev {
+		t := strings.TrimSpace(r)
+		if t == "" {
+			continue
+		}
+		k := strings.ToLower(t)
+		if _, ok := prevMap[k]; !ok {
+			prevMap[k] = t
+		}
+	}
+	nextMap := make(map[string]string, len(next))
+	for _, r := range next {
+		t := strings.TrimSpace(r)
+		if t == "" {
+			continue
+		}
+		k := strings.ToLower(t)
+		if _, ok := nextMap[k]; !ok {
+			nextMap[k] = t
+		}
+	}
+	for k, v := range nextMap {
+		if _, ok := prevMap[k]; !ok {
+			add = append(add, v)
+		}
+	}
+	for k, v := range prevMap {
+		if _, ok := nextMap[k]; !ok {
+			remove = append(remove, v)
+		}
+	}
+	return
+}
+
+// selectRefsForNode reads all refs for a node, ordered case-insensitively.
+// Every query against note_refs joins live nodes only, so revived notes come
+// back whole and deleted notes are never returned through it.
+func selectRefsForNode(q tagQuerier, nodeID string) ([]string, error) {
+	rows, err := q.Query(
+		`SELECT nr.ref FROM note_refs nr JOIN nodes n ON n.id = nr.node_id AND n.deleted_at IS NULL WHERE nr.node_id = ? ORDER BY nr.ref COLLATE NOCASE ASC`,
+		nodeID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("selectRefsForNode: %w", err)
+	}
+	defer rows.Close()
+	var refs []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return nil, fmt.Errorf("selectRefsForNode: scan: %w", err)
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
+}
+
 // Note represents a vault note node - all notes share type "note".
 // The user-vs-generated distinction is read from frontmatter author/origin,
 // not folders (KTD-1, R20).
@@ -82,6 +201,8 @@ type Note struct {
 	Author    string // frontmatter author, empty for user notes
 	Title     string // from frontmatter title or filename stem
 	Body      string // re-derivable cache stored in attrs (FTS source)
+	Kind      string // frontmatter kind, one of plano/implementacao/evidencia/nota
+	Refs      []string
 	Tags      []string
 	// Permission is the note's frontmatter permission override, carried raw
 	// from the file. The effective permission - the explicit value when present,
@@ -115,6 +236,7 @@ func (n Note) NodeAttrs() []byte {
 		"origin":     n.Origin,
 		"author":     n.Author,
 		"permission": n.Permission,
+		"kind":       NormalizeNoteKind(n.Kind),
 	}
 	if n.Channel != "" {
 		attrs["channel"] = n.Channel
@@ -131,6 +253,9 @@ func (n Note) NodeAttrs() []byte {
 
 // NodeTags returns the tag slice (NodeSpec requirement).
 func (n Note) NodeTags() []string { return n.Tags }
+
+// NodeRefs returns the refs slice (optional NodeRefser interface).
+func (n Note) NodeRefs() []string { return n.Refs }
 
 // FTSFields returns full-text-searchable content.
 func (n Note) FTSFields() FTSFields {
@@ -172,6 +297,7 @@ func GetNote(ctx context.Context, tx *graph.ReadTx, id string) (*Note, error) {
 		Origin          string          `json:"origin"`
 		Author          string          `json:"author"`
 		Permission      string          `json:"permission"`
+		Kind            string          `json:"kind"`
 		Channel         string          `json:"channel"`
 		LinkSuggestions []LinkCandidate `json:"linkSuggestions"`
 		NoLinksReason   string          `json:"noLinksReason"`
@@ -187,6 +313,11 @@ func GetNote(ctx context.Context, tx *graph.ReadTx, id string) (*Note, error) {
 		return nil, err
 	}
 
+	refs, err := selectRefsForNode(tx, id)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Note{
 		ID:              id,
 		CreatedAt:       tryParseTime(createdAt.String),
@@ -195,6 +326,8 @@ func GetNote(ctx context.Context, tx *graph.ReadTx, id string) (*Note, error) {
 		Author:          attrs.Author,
 		Title:           title.String,
 		Body:            attrs.Body,
+		Kind:            NormalizeNoteKind(attrs.Kind),
+		Refs:            refs,
 		Tags:            tags,
 		Permission:      attrs.Permission,
 		Channel:         attrs.Channel,
@@ -308,6 +441,7 @@ func ListNotes(ctx context.Context, tx *graph.ReadTx, f NoteFilter) ([]*Note, er
 			Origin          string          `json:"origin"`
 			Author          string          `json:"author"`
 			Permission      string          `json:"permission"`
+			Kind            string          `json:"kind"`
 			Channel         string          `json:"channel"`
 			LinkSuggestions []LinkCandidate `json:"linkSuggestions"`
 			NoLinksReason   string          `json:"noLinksReason"`
@@ -323,6 +457,11 @@ func ListNotes(ctx context.Context, tx *graph.ReadTx, f NoteFilter) ([]*Note, er
 			return nil, err
 		}
 
+		refs, err := selectRefsForNode(tx, id)
+		if err != nil {
+			return nil, err
+		}
+
 		out = append(out, &Note{
 			ID:              id,
 			CreatedAt:       tryParseTime(createdAt.String),
@@ -331,6 +470,8 @@ func ListNotes(ctx context.Context, tx *graph.ReadTx, f NoteFilter) ([]*Note, er
 			Author:          attrs.Author,
 			Title:           title.String,
 			Body:            attrs.Body,
+			Kind:            NormalizeNoteKind(attrs.Kind),
+			Refs:            refs,
 			Tags:            tags,
 			Permission:      attrs.Permission,
 			Channel:         attrs.Channel,
