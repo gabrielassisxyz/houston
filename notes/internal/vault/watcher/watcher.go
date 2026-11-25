@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -105,6 +106,10 @@ type Watcher struct {
 	dirs         map[string]struct{} // tracked directories
 	timers       map[string]stoppableTimer
 	pending      map[string][]EventKind // pending events per path (latest kind wins)
+
+	// dropped records that an event was lost - the events buffer was full,
+	// or the kernel's own queue overflowed - so the consumer can rescan.
+	dropped atomic.Bool
 }
 
 // New creates a new Watcher for the given root directory.
@@ -168,6 +173,13 @@ func newWithSources(root string, cfg Config, sched timerScheduler, raw <-chan fs
 // Events returns the channel on which ChangeEvents are emitted.
 func (w *Watcher) Events() <-chan ChangeEvent {
 	return w.events
+}
+
+// TakeDropped reports whether an event was lost since the last call, and
+// clears the flag. A true answer means the index may have missed a change
+// that only a rescan of the vault will find.
+func (w *Watcher) TakeDropped() bool {
+	return w.dropped.Swap(false)
 }
 
 // Start begins watching the root directory recursively.
@@ -318,6 +330,11 @@ func (w *Watcher) loop(ctx context.Context) {
 			if !ok {
 				return
 			}
+			if errors.Is(err, fsnotify.ErrEventOverflow) {
+				// The kernel's queue overflowed: events were lost before
+				// they ever reached this process.
+				w.dropped.Store(true)
+			}
 			slog.Error("watcher: fsnotify error", "error", err)
 		}
 	}
@@ -434,6 +451,14 @@ func (w *Watcher) schedule(path string, kind EventKind) {
 		case <-w.shuttingDown:
 			// Dropping a coalesced event during shutdown is the correct
 			// trade: the alternative is Stop hanging on a full buffer.
+		default:
+			// Never block. A first run that writes an id into thousands of
+			// notes raises an event for each write while nothing drains the
+			// buffer yet, and a blocking send would leave one goroutine
+			// waiting per event. The loss is recorded instead; the consumer
+			// takes the flag and rescans.
+			w.dropped.Store(true)
+			slog.Warn("watcher: events buffer full; event dropped", "kind", ev.Kind, "path", ev.Path)
 		}
 	})
 	w.mu.Unlock()

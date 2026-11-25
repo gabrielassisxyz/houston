@@ -910,6 +910,19 @@ func (r *Reconciler) OnChange(ctx context.Context, absPath string) error {
 		return r.OnCreate(ctx, absPath)
 	}
 
+	// The path cache already records this id, path and content hash for a
+	// live note: the graph holds this file. The cold start's own id
+	// injections land here, one event per note it wrote, and each would
+	// otherwise cost a second full write of the note.
+	indexed, err := r.alreadyIndexed(ctx, fm.ID, relPath, contentHash)
+	if err != nil {
+		return fmt.Errorf("reconcile OnChange %q: %w", absPath, err)
+	}
+	if indexed {
+		slog.Debug("reconcile: change already indexed", "path", absPath, "node_id", fm.ID)
+		return nil
+	}
+
 	// The watcher reports a new file as a change, never as a create, so this
 	// is where a live copy of a note arrives. Updating the node from it would
 	// point the note at the copy; a different path is a move only when the
@@ -1455,6 +1468,24 @@ func (r *Reconciler) consumePendingDelete(noteID, contentHash string) *pendingDe
 	}
 
 	return nil
+}
+
+// alreadyIndexed reports whether note_paths binds id to relPath with
+// contentHash, for a live note.
+func (r *Reconciler) alreadyIndexed(ctx context.Context, id, relPath, contentHash string) (bool, error) {
+	var n int
+	err := r.g.DoRead(ctx, func(tx *graph.ReadTx) error {
+		return tx.QueryRow(
+			`SELECT COUNT(*) FROM note_paths np
+			 JOIN nodes n ON n.id = np.uuid AND n.type = 'note' AND n.deleted_at IS NULL
+			 WHERE np.uuid = ? AND np.path = ? AND np.content_hash = ?`,
+			id, relPath, contentHash,
+		).Scan(&n)
+	})
+	if err != nil {
+		return false, fmt.Errorf("check indexed state: %w", err)
+	}
+	return n > 0, nil
 }
 
 // hasPendingDelete reports, without consuming it, whether a delete is pending
