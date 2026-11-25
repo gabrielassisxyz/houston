@@ -98,7 +98,7 @@ kqueue descriptor per note against a default soft limit of 256).
    ```bash
    cd notes
    go build -o bin/houston ./cmd/houston
-   HOUSTON_VAULT=/path/to/vault notes/bin/houston preflight
+   HOUSTON_VAULT=/path/to/vault bin/houston preflight
    ```
    Fix every error the preflight reports before continuing.
 3. Install both agents from the checkout:
