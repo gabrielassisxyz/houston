@@ -253,15 +253,18 @@ func (r *Reconciler) applyMove(
 	_ []byte, // raw - not used here but kept for signature clarity
 	sameHash bool,
 ) error {
-	// Update path cache: forget old path, upsert new path.
+	// Update path cache. The upsert is keyed by uuid, so it moves the row
+	// off the old path by itself; forgetting the old path by name would drop
+	// the row of a note that has since taken that path over.
+	var displaced *pendingDelete
 	if err := r.g.DoWrite(ctx, func(tx *graph.WriteTx) error {
-		if err := forgetInTx(tx, old.path); err != nil {
-			return err
-		}
-		return upsertInTx(tx, old.uuid, newRelPath, diskHash)
+		var err error
+		displaced, err = claimPathInTx(tx, old.uuid, newRelPath, diskHash)
+		return err
 	}); err != nil {
 		return fmt.Errorf("applyMove cache update: %w", err)
 	}
+	r.pathClaimed(old.uuid, displaced)
 
 	slog.Info("coldstart: move",
 		"uuid", old.uuid,
@@ -301,7 +304,9 @@ func (r *Reconciler) softDeleteCached(ctx context.Context, e cachedPathEntry) er
 		// -2 suffix. Forgetting it is exactly what this function exists to
 		// clean, and leaving it makes every later ColdStart re-derive the
 		// same false "nothing to do" conclusion.
-		if ferr := forgetPath(ctx, r.g, e.path); ferr != nil {
+		if ferr := r.g.DoWrite(ctx, func(tx *graph.WriteTx) error {
+			return forgetUUIDInTx(tx, e.uuid)
+		}); ferr != nil {
 			return ferr
 		}
 		return nil
@@ -316,8 +321,9 @@ func (r *Reconciler) softDeleteCached(ctx context.Context, e cachedPathEntry) er
 
 	author := nodes.Author{Name: "human"}
 	txErr := r.g.DoWrite(ctx, func(tx *graph.WriteTx) error {
-		// Remove path cache entry.
-		if err := forgetInTx(tx, e.path); err != nil {
+		// Remove path cache entry, by id: the walk may have given its cached
+		// path to the note that replaced it.
+		if err := forgetUUIDInTx(tx, e.uuid); err != nil {
 			return err
 		}
 		return nodes.SoftDeleteNoteTx(ctx, tx, e.uuid, stem, title, author)

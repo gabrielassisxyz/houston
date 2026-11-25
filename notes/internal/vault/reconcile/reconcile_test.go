@@ -788,9 +788,13 @@ func TestOnCreate_DanglingPromotedOnArrival(t *testing.T) {
 // insert, or the rollback being asserted never has anything to undo.
 //
 // This used to be injected with a duplicate node id, which stopped failing once
-// OnCreate learned to adopt a live node absent from the cache. The property
-// under test was never "an id clash errors" - it is "a mid-transaction failure
-// leaves nothing behind" - so the trigger moved and the assertions stayed.
+// OnCreate learned to adopt a live node absent from the cache, and then with a
+// path squatted by another uuid, which stopped failing once a path replaced in
+// place could be taken over. The property under test was never "a clash
+// errors" - it is "a mid-transaction failure leaves nothing behind" - so the
+// trigger moved again and the assertions stayed: the path-cache insert now
+// fails on an injected SQLite trigger, after the node and the takeover of the
+// squatted path have both been written inside the transaction.
 func TestOnCreate_RollbackOnFailure(t *testing.T) {
 	g := testutil.NewInMemoryTestGraph(t)
 	ctx := context.Background()
@@ -800,13 +804,20 @@ func TestOnCreate_RollbackOnFailure(t *testing.T) {
 	if err := reconcile.Upsert(ctx, g, squatter, "clash.md", "some-hash"); err != nil {
 		t.Fatalf("squat the path: %v", err)
 	}
+	if err := g.DoWrite(ctx, func(tx *graph.WriteTx) error {
+		_, err := tx.Exec(`CREATE TRIGGER refuse_path_insert BEFORE INSERT ON note_paths
+			BEGIN SELECT RAISE(ABORT, 'injected path-cache failure'); END`)
+		return err
+	}); err != nil {
+		t.Fatalf("install the failing trigger: %v", err)
+	}
 
 	path := filepath.Join(vault, "clash.md")
 	writeFile(t, path, "---\nid: fresh-id\ntitle: Clash\n---\n\nBody.\n")
 
 	rec := reconcile.New(g, vault)
 	if err := rec.OnCreate(ctx, path); err == nil {
-		t.Fatal("expected OnCreate to fail: the path is already claimed by another uuid")
+		t.Fatal("expected OnCreate to fail: the path-cache insert is refused")
 	}
 
 	// The cache must still hold the squatter, never the half-written note.
