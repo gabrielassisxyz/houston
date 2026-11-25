@@ -126,6 +126,38 @@ Re-running `scripts/install-services.sh --notes-vault <dir>` is idempotent. Unin
 the notes agent is `launchctl bootout gui/$(id -u)/houston.notes` plus removing
 `~/Library/LaunchAgents/houston.notes.plist`; the hub agent is untouched.
 
+### Daily backup
+
+Pass `--notes-backup-dir <absolute path>` alongside `--notes-vault` to install a third agent,
+`houston.notes-backup`, which copies the database once a day at noon (and at the next wake or
+login when the machine was asleep or off at noon) into `<dir>/houston-backup` as
+`notes-YYYY-MM-DD.db`, keeping the seven most recent copies. The directory must not equal or lie
+inside the vault. `--print-notes-backup` prints the backup plist without touching disk, and
+requires `--notes-vault` and `--notes-backup-dir`.
+
+The database lives outside the vault so its live file and write-ahead log never ride the sync;
+the backup agent instead copies it with `VACUUM INTO` (see
+[scripts/notes-backup.sh](../scripts/notes-backup.sh)), which writes one closed file in `delete`
+journal mode while the service keeps running. That single file is safe to sync, while the live
+file and its `-wal`/`-shm` companions are not. Seven copies are kept: enough history to recover
+from a bad day without filling the synced folder. The copies are the only place holding the notes
+revision history; a fresh index of the vault rebuilds everything else in the database, since the
+service writes no pin or link-suggestion state.
+
+To restore a copy, stop the notes agent, remove the `-wal` and `-shm` files beside the database,
+copy the backup over the database path, and start the agent again:
+
+```bash
+launchctl bootout "gui/$(id -u)/houston.notes"
+rm -f /path/to/notes.db-wal /path/to/notes.db-shm
+cp "/path/to/backups/houston-backup/notes-YYYY-MM-DD.db" /path/to/notes.db
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/houston.notes.plist
+```
+
+Uninstalling the backup agent is `launchctl bootout gui/$(id -u)/houston.notes-backup` plus
+removing `~/Library/LaunchAgents/houston.notes-backup.plist`; the copies already in the folder
+are plain files and stay.
+
 ## Updating
 
 Run [scripts/update.sh](../scripts/update.sh) from anywhere:
