@@ -79,6 +79,7 @@ export interface ProjectInfo {
   path: string | null;
   addedAt?: string;
   lastOpened?: string;
+  pipelineRepo?: string;
   hasBeads: boolean;
 }
 export interface ProjectsResponse {
@@ -91,7 +92,7 @@ export interface DoctorResponse {
   version?: string;
   repoPath: string;
   message: string;
-  project: { id: string; name: string; path: string | null } | null;
+  project: { id: string; name: string; path: string | null; pipelineRepo?: string } | null;
   config: {
     humanActor: string;
     humanAllowlist: string[];
@@ -156,6 +157,7 @@ export const ALL_BEADS_STREAM_URL = "/api/all/beads/stream";
 
 export interface CapabilitiesResponse {
   workDashboardUrl: string | null;
+  chain: boolean;
 }
 
 export type WorkProbeResponse =
@@ -331,10 +333,10 @@ export const api = {
       request<ProjectInfo>("/api/projects", { method: "POST", body: JSON.stringify({ path }) }),
     remove: (id: string) =>
       request<{ removed: string }>(`/api/projects/${enc(id)}`, { method: "DELETE" }),
-    rename: (id: string, name: string) =>
+    update: (id: string, patch: { name?: string; pipelineRepo?: string }) =>
       request<ProjectInfo>(`/api/projects/${enc(id)}`, {
         method: "PATCH",
-        body: JSON.stringify({ name }),
+        body: JSON.stringify(patch),
       }),
   },
 

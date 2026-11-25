@@ -526,6 +526,78 @@ try {
   assert.ok((await status().innerText()).includes("workDashboardUrl"), "names the key");
   assert.match(await status().innerText(), /reinici/i, "names the restart");
 
+  // --- Navigation: link and card only when configured ---
+  step = "no nav without key";
+  await newPage();
+  await page.goto(`${base}/p/demo`);
+  await page.locator("aside nav").waitFor();
+  await eventually(async () => capsGets > 0, "capabilities answered on /p/demo");
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(await page.getByRole("link", { name: "Trabalho", exact: true }).count(), 0, "no sidebar link without the key");
+  await newPage();
+  await page.goto(`${base}/`);
+  await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
+  await eventually(async () => capsGets > 0, "capabilities answered on /");
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(await page.getByRole("button", { name: /^Trabalho/ }).count(), 0, "no launcher card without the key");
+
+  step = "sidebar link to work";
+  put = await putConfig({ workDashboardUrl: dashboardUrl(synthetic) });
+  assert.equal(put.status, 200);
+  await newPage();
+  await page.goto(`${base}/p/demo`);
+  const demoTrabalho = page.getByRole("link", { name: "Trabalho", exact: true });
+  await demoTrabalho.waitFor();
+  await demoTrabalho.click();
+  await page.waitForURL((url) => url.pathname === "/work");
+  assert.equal(await page.getByRole("link", { name: "Trabalho", exact: true }).getAttribute("aria-current"), "page", "aria-current on /work");
+  await frame().locator("text=synthetic dashboard").waitFor();
+
+  step = "launcher order";
+  await newPage();
+  let launcherProjects = [
+    { id: "demo", name: "Demo", path: null, hasBeads: true },
+    { id: "alpha", name: "Alpha App", path: "/fixture/alpha", hasBeads: true },
+    { id: "beta", name: "Beta Tools", path: "/fixture/beta", hasBeads: true },
+  ];
+  await page.route("**/api/projects", (route) => route.fulfill({ json: { projects: launcherProjects } }));
+  await page.goto(`${base}/`);
+  const trabalhoCard = page.getByRole("button", { name: /^Trabalho/ });
+  await trabalhoCard.waitFor();
+  assert.equal(await trabalhoCard.getAttribute("lang"), "pt-BR", "card lang pt-BR");
+  const cards = await page.locator('[role="button"][tabindex="0"]').allInnerTexts();
+  assert.match(cards[0], /^All projects/, "All projects first");
+  assert.match(cards[1], /^Sprints/, "Sprints second");
+  assert.match(cards[2], /^Demo/, "Demo third");
+  assert.match(cards[3], /^Trabalho/, "Trabalho fourth");
+  assert.equal(cards[3].split("\n").map((s) => s.trim())[1], "Painel do trabalho", "second line exactly Painel do trabalho");
+  assert.match(cards[4], /Alpha/, "first project card after Trabalho");
+  assert.match(cards[5], /Beta/, "second project card after Trabalho");
+  await trabalhoCard.click();
+  await page.waitForURL((url) => url.pathname === "/work");
+  await frame().locator("text=synthetic dashboard").waitFor();
+
+  step = "launcher with only demo";
+  launcherProjects = [{ id: "demo", name: "Demo", path: null, hasBeads: true }];
+  await page.goto(`${base}/`);
+  await trabalhoCard.waitFor();
+  await page.getByRole("button", { name: "Add your first project" }).waitFor();
+  assert.equal(await page.getByRole("button", { name: /^Trabalho/ }).count(), 1, "Trabalho still there with only demo");
+  await page.unroute("**/api/projects");
+
+  step = "narrow sheet on work closes";
+  await context.close();
+  await newPage({ width: 390, height: 800 });
+  await openWork();
+  await frame().locator("text=synthetic dashboard").waitFor();
+  await page.getByRole("button", { name: "Open navigation and project menu" }).click();
+  const workSheet = page.getByRole("dialog");
+  const sheetLink = workSheet.getByRole("link", { name: "Trabalho", exact: true });
+  await sheetLink.waitFor();
+  await sheetLink.click();
+  await workSheet.waitFor({ state: "hidden" });
+  assert.equal(new URL(page.url()).pathname, "/work", "still on /work after sheet link");
+
   // --- Console and page errors outside deliberate 500s ---
   step = "error hygiene";
   assert.deepEqual(pageerrors, [], `no pageerror, saw ${JSON.stringify(pageerrors)}`);
