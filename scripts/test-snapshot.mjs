@@ -1,17 +1,23 @@
 // The format-v1 snapshot reader. Pure, no build and no server: lib/snapshot-format.ts loads
 // through a transpile-then-vm loader and runs over scripts/fixtures/snapshot-v1.json and copies of
-// it edited case by case.
+// it edited case by case. lib/snapshot.ts runs in child processes (this script re-executed with
+// SCOTTY_SNAPSHOT_CHILD naming the case), each with a throwaway config directory, working
+// directory and snapshot files under os.tmpdir().
 import assert from 'node:assert/strict';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
+import os from 'node:os';
+import path from 'node:path';
 import vm from 'node:vm';
 import ts from 'typescript';
 
 const require = createRequire(import.meta.url);
 const fixtureText = fs.readFileSync(new URL('./fixtures/snapshot-v1.json', import.meta.url), 'utf8');
 
-// esModuleInterop, because without it `import fs from "node:fs"` compiles to an undefined
-// `node_fs_1.default`.
+// Memoized by name, so every `./config` import of one process is the same module and the
+// `saveConfig` a case calls is the one lib/snapshot.ts reads. esModuleInterop, because without it
+// `import fs from "node:fs"` compiles to an undefined `node_fs_1.default`.
 function makeLoader(external) {
   const moduleCache = new Map();
   function load(name) {
@@ -29,8 +35,13 @@ function makeLoader(external) {
   return load;
 }
 
-pureCases();
-console.log('test-snapshot: ok');
+if (process.env.SCOTTY_SNAPSHOT_CHILD) {
+  runChild(process.env.SCOTTY_SNAPSHOT_CHILD, process.env.SCOTTY_SNAPSHOT_FILES);
+} else {
+  pureCases();
+  childCases();
+  console.log('test-snapshot: ok');
+}
 
 // ------------------------------------------------------------------ pure: lib/snapshot-format.ts
 
@@ -402,5 +413,179 @@ function pureCases() {
     unreadable('no sources', { schema_version: 1 });
     unreadable('a root array', [base()]);
     unreadable('a root null', null);
+  }
+}
+
+// ------------------------------------------------------------------ child: lib/snapshot.ts
+
+function runChild(which, files) {
+  const realFs = require('node:fs');
+  const counts = { reads: 0, opens: 0, closes: 0 };
+  // Only reads of a descriptor count: lib/config.ts reads config.json by path.
+  const spiedFs = {
+    ...realFs,
+    readFileSync(target, ...rest) {
+      if (typeof target === 'number') counts.reads += 1;
+      return realFs.readFileSync(target, ...rest);
+    },
+    openSync(...args) {
+      const fd = realFs.openSync(...args);
+      counts.opens += 1;
+      return fd;
+    },
+    closeSync(fd) {
+      counts.closes += 1;
+      return realFs.closeSync(fd);
+    },
+  };
+  const load = makeLoader((id) => {
+    if (id === 'server-only') return {};
+    if (id === 'node:fs' || id === 'fs') return spiedFs;
+    return require(id);
+  });
+  const config = load('config');
+  const { readSnapshot } = load('snapshot');
+  const read = () => {
+    const result = readSnapshot();
+    assert.equal(counts.opens, counts.closes, `${which}: every descriptor opened is closed`);
+    return result;
+  };
+  const firstNumber = (result) => {
+    assert.equal(result.available, true, `${which}: the snapshot is available: ${result.reason}`);
+    return result.snapshot.tickets.incidents.records[0].number;
+  };
+  const setPath = (snapshotPath) => config.saveConfig({ snapshotPath });
+  const unavailable = (result, pattern, label) => {
+    assert.equal(result.available, false, `${label}: unavailable`);
+    assert.match(result.reason, pattern, `${label}: with its reason`);
+  };
+  const fileA = path.join(files, 'a.json');
+  const fileC = path.join(files, 'c.json');
+
+  if (which === 'unset') {
+    unavailable(read(), /not set/, 'unset path');
+    assert.equal(counts.opens, 0, 'unset path: nothing is opened');
+  } else if (which === 'missing') {
+    setPath(path.join(files, 'none.json'));
+    unavailable(read(), /does not exist/, 'missing file');
+  } else if (which === 'directory') {
+    setPath(files);
+    unavailable(read(), /not a regular file/, 'a directory');
+    assert.equal(counts.reads, 0, 'a directory is never read');
+  } else if (which === 'fifo') {
+    setPath(path.join(files, 'pipe.json'));
+    unavailable(read(), /not a regular file/, 'a named pipe');
+    assert.equal(counts.reads, 0, 'a named pipe is never read');
+  } else if (which === 'invalid-json') {
+    setPath(fileA);
+    unavailable(read(), /not valid JSON/, 'invalid JSON');
+    assert.equal(counts.reads, 1, 'invalid JSON: read once');
+    unavailable(read(), /not valid JSON/, 'invalid JSON again');
+    assert.equal(counts.reads, 1, 'invalid JSON: the unchanged file is not read again');
+  } else if (which === 'cache') {
+    setPath(fileA);
+    const first = read();
+    assert.equal(firstNumber(first), 'INC00000001', 'cache: the file is read');
+    assert.equal(read(), first, 'cache: a repeated call returns the cached result');
+    read();
+    assert.equal(counts.reads, 1, 'cache: one read across repeated calls');
+
+    const before = fs.statSync(fileA);
+    const temp = path.join(files, 'a.json.tmp');
+    fs.writeFileSync(temp, fixtureText.replaceAll('INC00000001', 'INC00000002'));
+    fs.renameSync(temp, fileA);
+    assert.equal(fs.statSync(fileA).size, before.size, 'cache: the rewrite has equal length');
+    assert.equal(firstNumber(read()), 'INC00000002', 'cache: an atomic rewrite of equal length is read again');
+    assert.equal(counts.reads, 2, 'cache: two reads after an atomic rewrite');
+    read();
+    assert.equal(counts.reads, 2, 'cache: the rewritten file is cached in turn');
+
+    setPath(fileC);
+    assert.equal(firstNumber(read()), 'INC00000003', 'cache: a new path reads the other file');
+    assert.equal(counts.reads, 3, 'cache: three reads after the path changes');
+    // A symlink leaves the target's identity untouched, so only the path tells the two apart.
+    const alias = path.join(files, 'c-alias.json');
+    fs.symlinkSync(fileC, alias);
+    setPath(alias);
+    assert.equal(firstNumber(read()), 'INC00000003', 'cache: another path to the same file reads it');
+    assert.equal(counts.reads, 4, 'cache: the cache is keyed on the path as well as the file');
+    setPath(fileC);
+    read();
+    assert.equal(counts.reads, 5, 'cache: back to the first path reads again');
+
+    setPath(null);
+    unavailable(read(), /not set/, 'cache: snapshotPath cleared after a successful read');
+    assert.equal(counts.reads, 5, 'cache: a cleared path reads nothing');
+    setPath(fileC);
+    assert.equal(firstNumber(read()), 'INC00000003', 'cache: the path set again reads its file');
+    assert.equal(counts.reads, 6, 'cache: clearing the path cleared the cache');
+  } else if (which === 'clears-cache') {
+    // Through a symlink, so the target file keeps its exact identity while the path stops
+    // naming it: only a cleared cache makes the next call read it again.
+    const link = path.join(files, 'link.json');
+    const pointAt = (target) => {
+      fs.rmSync(link, { force: true });
+      fs.symlinkSync(target, link);
+    };
+    pointAt(fileA);
+    setPath(link);
+    assert.equal(firstNumber(read()), 'INC00000001', 'clears-cache: read through the link');
+    pointAt(path.join(files, 'none.json'));
+    unavailable(read(), /does not exist/, 'clears-cache: a missing file');
+    pointAt(fileA);
+    firstNumber(read());
+    assert.equal(counts.reads, 2, 'clears-cache: a missing file cleared the cache');
+    pointAt(files);
+    unavailable(read(), /not a regular file/, 'clears-cache: a directory');
+    pointAt(fileA);
+    firstNumber(read());
+    assert.equal(counts.reads, 3, 'clears-cache: a directory cleared the cache');
+  } else {
+    throw new Error(`unknown child case ${which}`);
+  }
+}
+
+function childCases() {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'houston-snapshot-'));
+  try {
+    const runCase = (name, setup) => {
+      const dir = fs.mkdtempSync(path.join(scratch, `${name}-`));
+      const xdg = path.join(dir, 'xdg');
+      const work = path.join(dir, 'work');
+      const files = path.join(dir, 'files');
+      fs.mkdirSync(path.join(xdg, 'houston'), { recursive: true });
+      fs.writeFileSync(path.join(xdg, 'houston', 'config.json'), JSON.stringify({ projects: [] }));
+      fs.mkdirSync(work);
+      fs.mkdirSync(files);
+      setup?.(files);
+      const env = {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: path.join(dir, 'no-global'),
+        GIT_CONFIG_NOSYSTEM: '1',
+        XDG_CONFIG_HOME: xdg,
+        SCOTTY_SNAPSHOT_CHILD: name,
+        SCOTTY_SNAPSHOT_FILES: files,
+      };
+      delete env.BEADS_REPO;
+      delete env.BEADS_ACTOR;
+      delete env.SCOTTY_TEST_URL;
+      // The timeout catches a named pipe that holds the open.
+      const res = spawnSync(process.execPath, [process.argv[1]], { cwd: work, env, encoding: 'utf8', timeout: 20000 });
+      assert.equal(res.error, undefined, `${name}: the child ran to its end: ${res.error}`);
+      assert.equal(res.status, 0, `${name} exited ${res.status}: stdout=${res.stdout} stderr=${res.stderr}`);
+    };
+    const writeA = (files) => fs.writeFileSync(path.join(files, 'a.json'), fixtureText);
+    runCase('unset');
+    runCase('missing');
+    runCase('directory');
+    runCase('fifo', (files) => execFileSync('mkfifo', [path.join(files, 'pipe.json')]));
+    runCase('invalid-json', (files) => fs.writeFileSync(path.join(files, 'a.json'), '{"schema_version": 1,'));
+    runCase('cache', (files) => {
+      writeA(files);
+      fs.writeFileSync(path.join(files, 'c.json'), fixtureText.replaceAll('INC00000001', 'INC00000003'));
+    });
+    runCase('clears-cache', writeA);
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true });
   }
 }
