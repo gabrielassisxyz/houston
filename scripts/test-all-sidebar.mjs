@@ -40,19 +40,28 @@ let page;
 // Named in the failure report: a wait that times out says only TimeoutError.
 let step = "start";
 
-async function openScenario(url, { width = 1500, readOnly = false, storedWidth } = {}) {
+async function openScenario(url, { width = 1500, readOnly = false, storedWidth, configured = false } = {}) {
   const context = await browser.newContext({ viewport: { width, height: 1000 } });
   if (storedWidth) {
     await context.addInitScript((value) => window.localStorage.setItem("bmus.width.sidebar", value), String(storedWidth));
   }
   page = await context.newPage();
   page.setDefaultTimeout(10_000);
-  const state = { requests: [], viewerAnswers: 0 };
+  const state = { requests: [], viewerAnswers: 0, capsAnswers: 0 };
+  const workUrl = "http://127.0.0.1:9/painel-do-trabalho";
   await page.route("**/api/**", (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     state.requests.push({ method: request.method(), path, from: new URL(page.url()).pathname });
+    if (path === "/api/work/probe") {
+      if (configured) return route.fulfill({ json: { configured: true, reachable: false } });
+      return route.fulfill({ status: 500, json: { error: `unexpected ${request.method()} ${path}` } });
+    }
     if (request.method() !== "GET") return route.fulfill({ status: 500, json: { error: `unexpected ${request.method()} ${path}` } });
+    if (path === "/api/capabilities") {
+      state.capsAnswers += 1;
+      return route.fulfill({ json: { workDashboardUrl: configured ? workUrl : null } });
+    }
     if (path === "/api/viewer-mode") {
       state.viewerAnswers += 1;
       return route.fulfill({ json: { readOnly } });
