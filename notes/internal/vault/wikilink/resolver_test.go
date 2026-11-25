@@ -536,11 +536,11 @@ func TestPromoteDangling_SelfLinkCleanedUp(t *testing.T) {
 	// exists yet, so the link is stored as dangling.
 	noteID := createTestNote(t, g, ctx, "Self", "body")
 
-	// Manually insert a dangling row that points back to the same note.
+	// Manually insert a dangling row (stored normalized) that points back to the same note.
 	err := g.DoWrite(ctx, func(tx *graph.WriteTx) error {
 		_, err := tx.Exec(
 			`INSERT INTO dangling_links (id, src_node_id, target_key, target_kind) VALUES (?, ?, ?, ?)`,
-			"dl-self-test", noteID, "Self", "stem",
+			"dl-self-test", noteID, "self", "stem",
 		)
 		return err
 	})
@@ -683,5 +683,280 @@ func TestResolveUUIDTargetToNonNoteNode(t *testing.T) {
 	}
 	if n := countEdgesWithLabel(t, g, ctx, srcID, bookmarkID, "links_to"); n != 1 {
 		t.Errorf("expected 1 links_to edge note->bookmark, got %d", n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Obsidian resolution rules tests (hou-oc5.19)
+// ---------------------------------------------------------------------------
+
+// TestResolveNestedTwoFoldersDeep verifies a bare [[Name]] resolves to a note
+// stored two folders down, without regard to case.
+func TestResolveNestedTwoFoldersDeep(t *testing.T) {
+	ctx := context.Background()
+	g := testutil.NewInMemoryTestGraph(t)
+
+	srcID := createTestNote(t, g, ctx, "Source", "body")
+	dstID := createTestNote(t, g, ctx, "Different Title", "body")
+	insertNotePath(t, g, ctx, dstID, "area/project/DeepNote.md")
+
+	r := &Resolver{}
+	outcomes, err := r.Resolve(ctx, g, srcID, "See [[deepnote]].")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(outcomes) != 1 || !outcomes[0].Resolved || outcomes[0].ResolvedBy != "stem" {
+		t.Fatalf("expected stem resolution, got %+v", outcomes)
+	}
+	if n := countEdgesWithLabel(t, g, ctx, srcID, dstID, "links_to"); n != 1 {
+		t.Errorf("expected 1 edge to nested note, got %d", n)
+	}
+}
+
+// TestResolveCandidateTiebreak_ShorterThenAlphabetical verifies that when
+// multiple files share a basename, the shortest relative path wins and ties
+// of equal path length are broken alphabetically.
+func TestResolveCandidateTiebreak_ShorterThenAlphabetical(t *testing.T) {
+	ctx := context.Background()
+	g := testutil.NewInMemoryTestGraph(t)
+
+	srcID := createTestNote(t, g, ctx, "Source", "body")
+	deepID := createTestNote(t, g, ctx, "Deep", "body")
+	shortID := createTestNote(t, g, ctx, "Short", "body")
+	insertNotePath(t, g, ctx, deepID, "alpha/beta/Shared.md")
+	insertNotePath(t, g, ctx, shortID, "z/Shared.md")
+
+	r := &Resolver{}
+	if _, err := r.Resolve(ctx, g, srcID, "See [[Shared]]."); err != nil {
+		t.Fatalf("Resolve (shorter): %v", err)
+	}
+	if n := countEdgesWithLabel(t, g, ctx, srcID, shortID, "links_to"); n != 1 {
+		t.Errorf("expected shorter path z/Shared.md to win, got edges=%d", n)
+	}
+	if n := countEdgesWithLabel(t, g, ctx, srcID, deepID, "links_to"); n != 0 {
+		t.Errorf("expected deeper path alpha/beta/Shared.md to lose, got edges=%d", n)
+	}
+
+	// Equal-length paths: alphabetical order breaks the tie (a/Tie.md beats b/Tie.md).
+	bID := createTestNote(t, g, ctx, "B", "body")
+	aID := createTestNote(t, g, ctx, "A", "body")
+	insertNotePath(t, g, ctx, bID, "b/Tie.md")
+	insertNotePath(t, g, ctx, aID, "a/Tie.md")
+
+	if _, err := r.Resolve(ctx, g, srcID, "See [[Tie]]."); err != nil {
+		t.Fatalf("Resolve (alpha tie): %v", err)
+	}
+	if n := countEdgesWithLabel(t, g, ctx, srcID, aID, "links_to"); n != 1 {
+		t.Errorf("expected a/Tie.md to win alphabetical tie, got edges=%d", n)
+	}
+	if n := countEdgesWithLabel(t, g, ctx, srcID, bID, "links_to"); n != 0 {
+		t.Errorf("expected b/Tie.md to lose alphabetical tie, got edges=%d", n)
+	}
+}
+
+// TestResolveHeadingAndBlockAnchors verifies [[Note#Heading]] and [[Note#^block]]
+// resolve to Note, [[#Heading]] and [[^block]] make nothing, and [[Note#A]] +
+// [[Note#B]] deduplicate to a single edge (and a single dangling row when absent).
+func TestResolveHeadingAndBlockAnchors(t *testing.T) {
+	ctx := context.Background()
+	g := testutil.NewInMemoryTestGraph(t)
+
+	srcID := createTestNote(t, g, ctx, "Source", "body")
+	dstID := createTestNote(t, g, ctx, "Note", "body")
+	insertNotePath(t, g, ctx, dstID, "sub/Note.md")
+
+	r := &Resolver{}
+	outcomes, err := r.Resolve(ctx, g, srcID, "See [[Note#Heading]], [[Note#^blk1]], [[#Local]], and [[^localblk]].")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(outcomes) != 1 || !outcomes[0].Resolved {
+		t.Fatalf("expected 1 resolved deduplicated outcome, got %+v", outcomes)
+	}
+	if n := countEdgesWithLabel(t, g, ctx, srcID, dstID, "links_to"); n != 1 {
+		t.Errorf("expected 1 edge for [[Note#Heading]] + [[Note#^blk1]], got %d", n)
+	}
+	if n := countDanglingForSrc(t, g, ctx, srcID); n != 0 {
+		t.Errorf("expected 0 dangling rows for anchor-only links, got %d", n)
+	}
+
+	// Explicit [[Note#A]] and [[Note#B]] deduplication: resolved and dangling.
+	if _, err := r.Resolve(ctx, g, srcID, "[[Note#A]] and [[Note#B]]"); err != nil {
+		t.Fatalf("Resolve (dedup resolved): %v", err)
+	}
+	if n := countEdgesWithLabel(t, g, ctx, srcID, dstID, "links_to"); n != 1 {
+		t.Errorf("expected 1 edge for [[Note#A]] and [[Note#B]], got %d", n)
+	}
+
+	if _, err := r.Resolve(ctx, g, srcID, "[[Missing#A]] and [[Missing#B]]"); err != nil {
+		t.Fatalf("Resolve (dedup dangling): %v", err)
+	}
+	if n := countDanglingForSrc(t, g, ctx, srcID); n != 1 {
+		t.Errorf("expected 1 dangling row for [[Missing#A]] and [[Missing#B]], got %d", n)
+	}
+	var storedKey string
+	if err := g.DoRead(ctx, func(tx *graph.ReadTx) error {
+		return tx.QueryRow(`SELECT target_key FROM dangling_links WHERE src_node_id = ?`, srcID).Scan(&storedKey)
+	}); err != nil {
+		t.Fatalf("read dangling key: %v", err)
+	}
+	if storedKey != "missing" {
+		t.Errorf("dangling target_key = %q, want %q", storedKey, "missing")
+	}
+
+	// Anchor-only links alone create nothing at all.
+	outcomes, err = r.Resolve(ctx, g, srcID, "Only [[#Heading]] and [[^block]].")
+	if err != nil {
+		t.Fatalf("Resolve (anchor only): %v", err)
+	}
+	if len(outcomes) != 0 {
+		t.Errorf("expected 0 outcomes for anchor-only links, got %+v", outcomes)
+	}
+	if n := countDanglingForSrc(t, g, ctx, srcID); n != 0 {
+		t.Errorf("expected 0 dangling rows for anchor-only links, got %d", n)
+	}
+}
+
+// TestResolveEmbedsAndNonNoteExtensionsMakeNoEdge verifies ![[image.png]] and
+// [[report.pdf]] produce neither edges nor dangling rows.
+func TestResolveEmbedsAndNonNoteExtensionsMakeNoEdge(t *testing.T) {
+	ctx := context.Background()
+	g := testutil.NewInMemoryTestGraph(t)
+
+	srcID := createTestNote(t, g, ctx, "Source", "body")
+	imgNoteID := createTestNote(t, g, ctx, "image.png", "body")
+	insertNotePath(t, g, ctx, imgNoteID, "image.png.md")
+	pdfNoteID := createTestNote(t, g, ctx, "report.pdf", "body")
+	insertNotePath(t, g, ctx, pdfNoteID, "report.pdf.md")
+	otherID := createTestNote(t, g, ctx, "Embedded", "body")
+	insertNotePath(t, g, ctx, otherID, "Embedded.md")
+
+	r := &Resolver{}
+	outcomes, err := r.Resolve(ctx, g, srcID, "![[image.png]] and [[report.pdf]] and ![[Embedded]]")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(outcomes) != 0 {
+		t.Errorf("expected 0 outcomes, got %+v", outcomes)
+	}
+	if n := countDanglingForSrc(t, g, ctx, srcID); n != 0 {
+		t.Errorf("expected 0 dangling rows, got %d", n)
+	}
+	var edgeCount int
+	if err := g.DoRead(ctx, func(tx *graph.ReadTx) error {
+		return tx.QueryRow(`SELECT COUNT(*) FROM edges WHERE src = ?`, srcID).Scan(&edgeCount)
+	}); err != nil {
+		t.Fatalf("count edges: %v", err)
+	}
+	if edgeCount != 0 {
+		t.Errorf("expected 0 edges, got %d", edgeCount)
+	}
+}
+
+// TestResolveDottedNamesCaretsAndExplicitMdExtension verifies [[v1.2]],
+// [[2026.11.25]], [[2^n]], and [[a/b.md]] all resolve cleanly.
+func TestResolveDottedNamesCaretsAndExplicitMdExtension(t *testing.T) {
+	ctx := context.Background()
+	g := testutil.NewInMemoryTestGraph(t)
+
+	srcID := createTestNote(t, g, ctx, "Source", "body")
+	vID := createTestNote(t, g, ctx, "Release v1.2", "body")
+	insertNotePath(t, g, ctx, vID, "releases/v1.2.md")
+	dateID := createTestNote(t, g, ctx, "Daily", "body")
+	insertNotePath(t, g, ctx, dateID, "daily/2026.11.25.md")
+	powID := createTestNote(t, g, ctx, "2^n", "body")
+	insertNotePath(t, g, ctx, powID, "math/2^n.md")
+	abID := createTestNote(t, g, ctx, "B", "body")
+	insertNotePath(t, g, ctx, abID, "a/b.md")
+
+	r := &Resolver{}
+	outcomes, err := r.Resolve(ctx, g, srcID, "See [[v1.2]], [[2026.11.25]], [[2^n]], and [[a/b.md]].")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(outcomes) != 4 {
+		t.Fatalf("expected 4 outcomes, got %d: %+v", len(outcomes), outcomes)
+	}
+	for _, dst := range []string{vID, dateID, powID, abID} {
+		if n := countEdgesWithLabel(t, g, ctx, srcID, dst, "links_to"); n != 1 {
+			t.Errorf("expected 1 edge to %s, got %d", dst, n)
+		}
+	}
+}
+
+// TestResolveUUIDWithNoNodeFallsThrough verifies a UUID-shaped target that does
+// not match any live node falls through to path/stem/title lookup (or becomes a
+// dangling row instead of erroring on edge creation).
+func TestResolveUUIDWithNoNodeFallsThrough(t *testing.T) {
+	ctx := context.Background()
+	g := testutil.NewInMemoryTestGraph(t)
+
+	srcID := createTestNote(t, g, ctx, "Source", "body")
+
+	// Case 1: UUID-shaped target matches a note's filename, not its node ID.
+	const fakeUUID = "11111111-2222-3333-4444-555555555555"
+	noteID := createTestNote(t, g, ctx, "Named By UUID", "body")
+	insertNotePath(t, g, ctx, noteID, "archive/"+fakeUUID+".md")
+
+	// Case 2: UUID-shaped target matches nothing anywhere -> becomes dangling.
+	const absentUUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+	r := &Resolver{}
+	outcomes, err := r.Resolve(ctx, g, srcID, "See [["+fakeUUID+"]] and [["+absentUUID+"]].")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(outcomes) != 2 {
+		t.Fatalf("expected 2 outcomes, got %d: %+v", len(outcomes), outcomes)
+	}
+	if !outcomes[0].Resolved || outcomes[0].ResolvedBy != "stem" {
+		t.Errorf("expected UUID target with no node to fall through to stem, got %+v", outcomes[0])
+	}
+	if n := countEdgesWithLabel(t, g, ctx, srcID, noteID, "links_to"); n != 1 {
+		t.Errorf("expected 1 edge to note matched by filename, got %d", n)
+	}
+	if outcomes[1].Resolved {
+		t.Errorf("expected absent UUID to remain dangling, got %+v", outcomes[1])
+	}
+	if n := countDanglingForSrc(t, g, ctx, srcID); n != 1 {
+		t.Errorf("expected 1 dangling row for absent UUID, got %d", n)
+	}
+}
+
+// TestPromoteDangling_MultipleSpellingsLeaveOneEdgeAndNoDangling verifies that
+// a source holding both [[Note]] and [[sub/note]] as dangling links ends up
+// with exactly one edge and zero dangling rows when sub/note.md appears.
+func TestPromoteDangling_MultipleSpellingsLeaveOneEdgeAndNoDangling(t *testing.T) {
+	ctx := context.Background()
+	g := testutil.NewInMemoryTestGraph(t)
+
+	srcID := createTestNote(t, g, ctx, "Source", "body")
+	r := &Resolver{}
+	if _, err := r.Resolve(ctx, g, srcID, "See [[Note]] and [[sub/note]]."); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if n := countDanglingForSrc(t, g, ctx, srcID); n != 2 {
+		t.Fatalf("expected 2 dangling rows before promote, got %d", n)
+	}
+
+	dstID := createTestNote(t, g, ctx, "Note", "body")
+	insertNotePath(t, g, ctx, dstID, "sub/note.md")
+
+	promoted, err := PromoteDangling(ctx, g, dstID,
+		PromoteKey{Key: "note"},
+		PromoteKey{Key: "sub/note"},
+		PromoteKey{Key: dstID},
+	)
+	if err != nil {
+		t.Fatalf("PromoteDangling: %v", err)
+	}
+	if promoted != 1 {
+		t.Errorf("expected promoted=1, got %d", promoted)
+	}
+	if n := countEdgesWithLabel(t, g, ctx, srcID, dstID, "links_to"); n != 1 {
+		t.Errorf("expected exactly 1 links_to edge, got %d", n)
+	}
+	if n := countDanglingForSrc(t, g, ctx, srcID); n != 0 {
+		t.Errorf("expected 0 remaining dangling rows, got %d", n)
 	}
 }
