@@ -137,13 +137,7 @@ func runServe(ctx context.Context, stdout, stderr io.Writer, cfg *config.NotesCo
 		_ = release()
 		return fmt.Errorf("houston serve: register routes: %w", err)
 	}
-	// kernl's request middleware (internal/api/routes.go:52-54): timing,
-	// logging and correlation, but no corsMiddleware (:55), since the request
-	// guard refuses every request that carries an Origin.
-	var h http.Handler = mux
-	h = logging.TimingMiddleware(h)
-	h = logging.LoggingMiddleware(h)
-	h = logging.CorrelationMiddleware(h)
+	h := buildServeHandler(mux)
 
 	addr := net.JoinHostPort(cfg.Server.Host, strconv.Itoa(cfg.Server.Port))
 	ln, err := net.Listen("tcp", addr)
@@ -206,6 +200,19 @@ func runServe(ctx context.Context, stdout, stderr io.Writer, cfg *config.NotesCo
 		return fmt.Errorf("houston serve: server error: %w", serveErr)
 	}
 	return errors.Join(shutErr, closeErr, relErr)
+}
+
+// buildServeHandler wraps the notes mux with the request guard inside the
+// timing, logging and correlation middleware (kernl's internal/api/routes.go:52-54,
+// without corsMiddleware since the guard refuses every request carrying an
+// Origin). Placing the guard inside logging and correlation ensures every
+// refusal is logged with its correlation ID.
+func buildServeHandler(mux http.Handler) http.Handler {
+	var h http.Handler = requestGuardMiddleware(mux)
+	h = logging.TimingMiddleware(h)
+	h = logging.LoggingMiddleware(h)
+	h = logging.CorrelationMiddleware(h)
+	return h
 }
 
 // printGraphLockHint writes the multi-line way out of a refused lock: the
