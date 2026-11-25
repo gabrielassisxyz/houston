@@ -530,6 +530,7 @@ func (r *Reconciler) OnCreate(ctx context.Context, absPath string) error {
 	if err != nil {
 		return fmt.Errorf("reconcile OnCreate %q: frontmatter: %w", absPath, err)
 	}
+	r.reportPermission(relPath, fm)
 
 	author := ResolveAuthor(fm.Author)
 	title := resolveTitle(fm, absPath)
@@ -821,6 +822,7 @@ func (r *Reconciler) OnChange(ctx context.Context, absPath string) error {
 	if err != nil {
 		return fmt.Errorf("reconcile OnChange %q: frontmatter: %w", absPath, err)
 	}
+	r.reportPermission(relPath, fm)
 
 	// If there's still no UUID after inject (very unusual), fall back to create.
 	if fm.ID == "" {
@@ -1040,12 +1042,14 @@ func NoteFromFile(fm *frontmatter.Frontmatter, title, body string) nodes.Note {
 func noteFromFile(ctx context.Context, tx *graph.WriteTx, id string, fm *frontmatter.Frontmatter, title, body string) (nodes.Note, error) {
 	n := NoteFromFile(fm, title, body)
 	n.ID = id
-	// Refuse an unrecognised permission value here, at the moment the file
-	// becomes a note, rather than letting a typo'd policy sit in attrs and
-	// read as permissive at the surface. The resolver is the single definition
-	// of the mapping; the endpoint calls it again to answer the same question.
-	if _, err := ResolvePermission(fm.Permission, fm.Author); err != nil {
-		return nodes.Note{}, err
+	// An unrecognised permission value is stored as "ask", the most
+	// restrictive known one, at the moment the file becomes a note. Refusing
+	// it hid the whole note from the index over one typo'd field, and storing
+	// it as written would sit in attrs where every reader of the index has to
+	// refuse it again. The reconciler reports the file, so the typo is still
+	// seen; the write endpoint keeps refusing it, since a writer can be told.
+	if permissionUnknown(fm) {
+		n.Permission = PermissionAsk
 	}
 	existing, err := nodes.GetNote(ctx, tx.AsReadTx(), id)
 	if err == nil {
@@ -1058,6 +1062,26 @@ func noteFromFile(ctx context.Context, tx *graph.WriteTx, id string, fm *frontma
 		return n, nil
 	}
 	return n, err
+}
+
+// permissionUnknown reports whether the file declares a permission that
+// ResolvePermission refuses.
+func permissionUnknown(fm *frontmatter.Frontmatter) bool {
+	_, err := ResolvePermission(fm.Permission, fm.Author)
+	return err != nil
+}
+
+// reportPermission records a file whose permission is indexed as "ask"
+// because the value it declares is unknown.
+func (r *Reconciler) reportPermission(relPath string, fm *frontmatter.Frontmatter) {
+	if !permissionUnknown(fm) {
+		return
+	}
+	r.report(relPath, ReportUnknownPermission, fmt.Sprintf("permission %q is unknown; indexed as %q", fm.Permission, PermissionAsk))
+	slog.Warn("reconcile: unknown permission; indexed as ask",
+		"path", relPath,
+		"permission", fm.Permission,
+	)
 }
 
 // LinkState is the link bookkeeping the endpoint writes onto a note after

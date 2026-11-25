@@ -138,6 +138,9 @@ func (r *Reconciler) reconcileFile(
 		slog.Warn("coldstart: frontmatter parse failed", "path", absPath, "error", parseErr)
 		return nil
 	}
+	// Here as well as in OnCreate and OnChange: a file unchanged since the
+	// last start reaches neither, and its report would not survive a restart.
+	r.reportPermission(relPath, fm)
 
 	diskHash := HashBytes(raw)
 

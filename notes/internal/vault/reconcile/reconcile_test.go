@@ -571,41 +571,59 @@ func TestResolvePermission(t *testing.T) {
 	}
 }
 
-// TestOnCreate_InvalidPermissionRefused verifies that a typo'd permission value
-// fails the reconcile rather than silently reading as permissive at the surface.
-func TestOnCreate_InvalidPermissionRefused(t *testing.T) {
+// TestOnCreate_UnknownPermissionIndexesAsAsk verifies that a typo'd permission
+// value no longer hides the note: it is indexed with the most restrictive
+// known value, "ask", never with what the file says, and the file is reported
+// so the typo is still seen. This used to refuse the create outright.
+func TestOnCreate_UnknownPermissionIndexesAsAsk(t *testing.T) {
 	g := testutil.NewInMemoryTestGraph(t)
 	ctx := context.Background()
 	vault := newVaultDir(t)
 
-	path := filepath.Join(vault, "typo.md")
-	writeFile(t, path, "---\nid: perm-typo\ntitle: Typo\npermission: edti\n---\n\nBody.\n")
+	for _, value := range []string{"edti", "readonly"} {
+		t.Run(value, func(t *testing.T) {
+			id := "perm-" + value
+			name := value + ".md"
+			path := filepath.Join(vault, name)
+			writeFile(t, path, "---\nid: "+id+"\ntitle: Typo\nauthor: da\npermission: "+value+"\n---\n\nBody.\n")
 
-	rec := reconcile.New(g, vault)
-	if err := rec.OnCreate(ctx, path); err == nil {
-		t.Fatal("expected OnCreate to fail on an unrecognised permission value")
-	}
+			rec := reconcile.New(g, vault)
+			if err := rec.OnCreate(ctx, path); err != nil {
+				t.Fatalf("OnCreate: %v", err)
+			}
+			assertNotePermission(t, g, id, "ask")
+			if _, found, err := reconcile.Lookup(ctx, g, name); err != nil || !found {
+				t.Fatalf("the note must be indexed (found=%v, err=%v)", found, err)
+			}
+			reps := rec.Reports()
+			if len(reps) != 1 || reps[0].Path != name || reps[0].Kind != reconcile.ReportUnknownPermission {
+				t.Fatalf("reports = %+v, want one unknown_permission report for %s", reps, name)
+			}
 
-	// Nothing must have been written: the node and the path cache both stay empty.
-	err := g.DoRead(ctx, func(tx *graph.ReadTx) error {
-		var count int
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM nodes`).Scan(&count); err != nil {
-			return err
-		}
-		if count != 0 {
-			t.Errorf("node count = %d, want 0 after refused create", count)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("DoRead: %v", err)
-	}
-	_, found, err := reconcile.Lookup(ctx, g, "typo.md")
-	if err != nil {
-		t.Fatalf("Lookup: %v", err)
-	}
-	if found {
-		t.Error("path cache should be empty after a refused create")
+			// A restart's cold start reaches the unchanged file through no
+			// event, and must still report it.
+			fresh := reconcile.New(g, vault)
+			if err := fresh.ColdStart(ctx); err != nil {
+				t.Fatalf("ColdStart: %v", err)
+			}
+			found := false
+			for _, rep := range fresh.Reports() {
+				found = found || (rep.Path == name && rep.Kind == reconcile.ReportUnknownPermission)
+			}
+			if !found {
+				t.Fatalf("a cold start lost the report; reports = %+v", fresh.Reports())
+			}
+
+			// Fixing the value clears the report.
+			writeFile(t, path, "---\nid: "+id+"\ntitle: Typo\nauthor: da\npermission: edit\n---\n\nBody.\n")
+			if err := rec.OnChange(ctx, path); err != nil {
+				t.Fatalf("OnChange: %v", err)
+			}
+			assertNotePermission(t, g, id, "edit")
+			if reps := rec.Reports(); len(reps) != 0 {
+				t.Fatalf("reports after the fix = %+v, want none", reps)
+			}
+		})
 	}
 }
 
