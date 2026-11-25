@@ -17,7 +17,9 @@ import (
 // Behavior:
 //   - If frontmatter exists and has no `id` line: inserts `id: <uuid>` immediately
 //     after the opening "---\n" fence, preserving all other bytes.
-//   - If frontmatter exists and already has an `id` line: returns original bytes unchanged.
+//   - If frontmatter exists and already has an id: returns original bytes unchanged.
+//   - If frontmatter has a top-level `id` line whose value reads as empty: that
+//     line becomes `id: <uuid>`, keeping its line ending.
 //   - If no frontmatter block exists: prepends a minimal `---\nid: <uuid>\n---\n` block.
 //   - Preserves BOM, line endings (LF/CRLF), comments, blank lines, and key order.
 func InjectID(raw []byte, uuid string) ([]byte, error) {
@@ -39,29 +41,85 @@ func InjectID(raw []byte, uuid string) ([]byte, error) {
 	block := vaultfile.ScanFrontmatter(raw)
 	switch block.State {
 	case vaultfile.NoBlock:
-		return prependBlock(bom, content, uuid), nil
+		return validateInjectedID(prependBlock(bom, content, uuid), uuid)
 	case vaultfile.UnclosedBlock:
 		// Parse refuses an unclosed block, so this is never reached; prepending
 		// a block above one would bury the user's YAML in the body.
 		return nil, fmt.Errorf("frontmatter: cannot inject into an unterminated block")
 	}
 
-	nl := determineNewline(content)
-
-	// Check if id already exists in the frontmatter block to avoid double-insertion
-	blockContent := string(raw[block.Start:block.Close])
-	if strings.Contains(blockContent, "\nid:") || strings.Contains(blockContent, "\r\nid:") || strings.HasPrefix(blockContent, "id:") {
-		return bytes.Clone(raw), nil
+	// The block can already hold an id key that the YAML reads as empty:
+	// "id:", "id: null", "id: ~", "id: # note" and their kin. Adding a second
+	// one would make the block fail to parse (mapping key "id" already
+	// defined), and leaving the file as it is gives it no id, so every pass
+	// would mint a new one and write the note again. The empty line takes the
+	// id instead, keeping its line ending.
+	if start, end, found := findTopLevelIDLine(raw, block.Start, block.Close); found {
+		var buf bytes.Buffer
+		buf.Write(raw[:start])
+		buf.WriteString("id: " + uuid)
+		buf.Write(raw[end:])
+		return validateInjectedID(buf.Bytes(), uuid)
 	}
 
 	// Insert `id: <uuid>` right after the opening fence line.
 	var buf bytes.Buffer
 	buf.Write(raw[:block.Start])
 	buf.WriteString("id: " + uuid)
-	buf.WriteString(nl)
+	buf.WriteString(determineNewline(content))
 	buf.Write(raw[block.Start:])
+	return validateInjectedID(buf.Bytes(), uuid)
+}
 
-	return buf.Bytes(), nil
+// findTopLevelIDLine locates, within raw[from:to], a line at column 0 holding
+// the key id, bare or quoted, and returns that line's span without its line
+// ending. An indented id belongs to a nested mapping and is not the note's.
+func findTopLevelIDLine(raw []byte, from, to int) (start, end int, found bool) {
+	for pos := from; pos < to; {
+		lineEnd := lineEndAt(raw, pos, to)
+		line := bytes.TrimRight(raw[pos:lineEnd], "\r")
+		if isIDKeyLine(line) {
+			return pos, pos + len(line), true
+		}
+		pos = lineEnd
+		if pos < to {
+			pos++
+		}
+	}
+	return 0, 0, false
+}
+
+// isIDKeyLine reports whether line opens a mapping entry whose key is id:
+// the key, optional blanks, a colon, then a blank or the end of the line.
+func isIDKeyLine(line []byte) bool {
+	var rest []byte
+	switch {
+	case bytes.HasPrefix(line, []byte("id")):
+		rest = line[2:]
+	case bytes.HasPrefix(line, []byte(`"id"`)), bytes.HasPrefix(line, []byte("'id'")):
+		rest = line[4:]
+	default:
+		return false
+	}
+	rest = bytes.TrimLeft(rest, " \t")
+	if len(rest) == 0 || rest[0] != ':' {
+		return false
+	}
+	return len(rest) == 1 || rest[1] == ' ' || rest[1] == '\t'
+}
+
+// validateInjectedID re-reads InjectID's own output and refuses it unless it
+// parses and carries the id it was asked to write. A note it would corrupt is
+// left alone and the caller told, rather than written and found later.
+func validateInjectedID(result []byte, uuid string) ([]byte, error) {
+	fm, err := Parse(result)
+	if err != nil {
+		return nil, fmt.Errorf("frontmatter: InjectID produced unparseable YAML: %w", err)
+	}
+	if fm.ID != uuid {
+		return nil, fmt.Errorf("frontmatter: InjectID wrote id %q but reads back %q", uuid, fm.ID)
+	}
+	return result, nil
 }
 
 // prependBlock creates a minimal frontmatter block with just the id.
