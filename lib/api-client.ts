@@ -156,6 +156,7 @@ export const ALL_BEADS_STREAM_URL = "/api/all/beads/stream";
 
 export interface CapabilitiesResponse {
   workDashboardUrl: string | null;
+  chain: boolean;
 }
 
 export type WorkProbeResponse =
