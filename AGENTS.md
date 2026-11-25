@@ -95,7 +95,7 @@ ignores for the same reason.
 There is no test runner and no `npm test`. The tests are standalone scripts under `scripts/`,
 run one at a time, and they come in three kinds:
 
-- **Pure**, no server: `node scripts/test-blocking.mjs`, `node scripts/test-install-services.mjs`.
+- **Pure**, no server: `node scripts/test-blocking.mjs`, `node scripts/test-install-services.mjs`, `node scripts/test-loopback-url.mjs`, `node scripts/test-doc-links.mjs`.
   They test scripts directly or load a module from `lib/` without a build (TypeScript transpile,
   then `vm`).
 - **Server-backed**: they drive the app over HTTP and need `SCOTTY_TEST_URL`. Run them through
@@ -104,7 +104,7 @@ run one at a time, and they come in three kinds:
 - **Browser**: Playwright scripts that answer the API from fixtures. The same wrapper runs them:
   `scripts/with-server.sh 3211 node scripts/test-br-gates.mjs`.
 
-Some scripts have a pure half and a server half and run the second only when `SCOTTY_TEST_URL`
+Some scripts, for example `scripts/test-work-config.mjs` and `scripts/test-work-probe.mjs`, have a pure half and a server half and run the second only when `SCOTTY_TEST_URL`
 is set, so run those both ways.
 
 What has to be true for a run to mean anything:
