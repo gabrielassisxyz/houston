@@ -882,6 +882,23 @@ func TestResolveDottedNamesCaretsAndExplicitMdExtension(t *testing.T) {
 			t.Errorf("expected 1 edge to %s, got %d", dst, n)
 		}
 	}
+
+	// Bare filename with explicit .md resolves nested file, and unresolved [[x/y.md]] stores "x/y".
+	if _, err := r.Resolve(ctx, g, srcID, "See [[b.md]] and [[x/y.md]]."); err != nil {
+		t.Fatalf("Resolve (explicit .md): %v", err)
+	}
+	if n := countEdgesWithLabel(t, g, ctx, srcID, abID, "links_to"); n != 1 {
+		t.Errorf("expected [[b.md]] to resolve to a/b.md, got %d edges", n)
+	}
+	var danglingKey string
+	if err := g.DoRead(ctx, func(tx *graph.ReadTx) error {
+		return tx.QueryRow(`SELECT target_key FROM dangling_links WHERE src_node_id = ?`, srcID).Scan(&danglingKey)
+	}); err != nil {
+		t.Fatalf("read dangling key: %v", err)
+	}
+	if danglingKey != "x/y" {
+		t.Errorf("dangling target_key for [[x/y.md]] = %q, want %q", danglingKey, "x/y")
+	}
 }
 
 // TestResolveUUIDWithNoNodeFallsThrough verifies a UUID-shaped target that does

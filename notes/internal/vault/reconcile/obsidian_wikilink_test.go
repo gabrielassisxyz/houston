@@ -347,6 +347,66 @@ func TestDeleteQualifiedPath_DoesNotAttachToOtherFolder(t *testing.T) {
 	}
 }
 
+// TestDeleteFallbackUsesRelPath_WhenEdgeLacksTargetText verifies that both
+// FlushExpired and ColdStart pass the note's vault-relative path (not its bare
+// stem) to SoftDeleteNoteTx, so an edge without attrs.target_text degrades to
+// "a/foo" instead of "foo" and cannot be stolen by b/foo.md.
+func TestDeleteFallbackUsesRelPath_WhenEdgeLacksTargetText(t *testing.T) {
+	for _, mode := range []string{"live-delete", "coldstart-delete"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			g := testutil.NewInMemoryTestGraph(t)
+			root := newVaultDir(t)
+			rec, clk := newTestReconcilerWithClock(g, root)
+
+			pathA := filepath.Join(root, "a", "foo.md")
+			writeFile(t, pathA, "---\nid: fb-a-foo\ntitle: Foo\n---\n\nA's foo.\n")
+			pathSrc := filepath.Join(root, "source.md")
+			writeFile(t, pathSrc, "---\nid: fb-src\ntitle: Source\n---\n\nNo link yet.\n")
+
+			if err := rec.OnCreate(ctx, pathA); err != nil {
+				t.Fatalf("OnCreate a/foo: %v", err)
+			}
+			if err := rec.OnCreate(ctx, pathSrc); err != nil {
+				t.Fatalf("OnCreate source: %v", err)
+			}
+
+			// Insert a legacy/attrs-less edge so softDeleteNote must use its relPath fallback.
+			if err := g.DoWrite(ctx, func(tx *graph.WriteTx) error {
+				_, err := tx.Exec(
+					`INSERT INTO edges(id, src, dst, label, attrs) VALUES ('fb-edge', 'fb-src', 'fb-a-foo', 'links_to', '{}')`,
+				)
+				return err
+			}); err != nil {
+				t.Fatalf("insert edge: %v", err)
+			}
+
+			if err := os.Remove(pathA); err != nil {
+				t.Fatalf("Remove a/foo: %v", err)
+			}
+			if mode == "live-delete" {
+				if err := rec.OnDelete(ctx, pathA); err != nil {
+					t.Fatalf("OnDelete: %v", err)
+				}
+				clk.Advance(2 * time.Second)
+				if _, err := rec.FlushExpired(ctx); err != nil {
+					t.Fatalf("FlushExpired: %v", err)
+				}
+			} else {
+				rec2 := reconcile.New(g, root)
+				if err := rec2.ColdStart(ctx); err != nil {
+					t.Fatalf("ColdStart: %v", err)
+				}
+			}
+
+			keys := danglingKeysForSrc(t, g, "fb-src")
+			if len(keys) != 1 || keys[0] != "a/foo" {
+				t.Fatalf("fallback dangling key = %v, want [a/foo]", keys)
+			}
+		})
+	}
+}
+
 // TestDanglingByUUID_PromotesOnArrival verifies that danglingKeysFor offers the
 // note's ID so a dangling UUID link heals when that note arrives.
 func TestDanglingByUUID_PromotesOnArrival(t *testing.T) {
