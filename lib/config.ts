@@ -4,6 +4,8 @@ import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import { checkObsidianVault } from "./config-values";
+import { checkLoopbackServiceUrl } from "./loopback-url";
 import { checkWorkDashboardUrl } from "./loopback-url";
 import { checkGithubOrgs, checkServiceNowHost, checkSnapshotPath } from "./config-values";
 
@@ -63,12 +65,22 @@ export interface AppConfig {
    * when unset; `null` is never stored or returned. An empty list is stored.
    */
   githubOrgs?: string[];
+  /**
+   * Root address of the notes service, which only the server calls. Absent
+   * when unset; `null` is never stored or returned.
+   */
+  notesServiceUrl?: string;
+  /**
+   * Name of the Obsidian vault that holds the notes, as pages need it to open
+   * one. Absent when unset; `null` is never stored or returned.
+   */
+  obsidianVault?: string;
 }
 
 /**
- * Patch type for `saveConfig`: `workDashboardUrl`, `snapshotPath` and
- * `serviceNowHost` are `string | null`, `githubOrgs` is `string[] | null`,
- * with `null` removing the key.
+ * Patch type for `saveConfig`: `workDashboardUrl`, `snapshotPath`,
+ * `serviceNowHost`, `notesServiceUrl` and `obsidianVault` are `string | null`,
+ * `githubOrgs` is `string[] | null`, with `null` removing the key.
  */
 export interface SaveConfigPatch {
   humanActor?: string;
@@ -79,6 +91,8 @@ export interface SaveConfigPatch {
   snapshotPath?: string | null;
   serviceNowHost?: string | null;
   githubOrgs?: string[] | null;
+  notesServiceUrl?: string | null;
+  obsidianVault?: string | null;
 }
 
 /**
@@ -372,6 +386,24 @@ export function getConfig(): AppConfig {
     }
   }
 
+  if (onDisk && onDisk.notesServiceUrl !== undefined) {
+    const checked = checkLoopbackServiceUrl(onDisk.notesServiceUrl);
+    if (checked.ok) {
+      merged.notesServiceUrl = checked.url;
+    } else {
+      console.warn(`[houston] config: notesServiceUrl ignored: ${checked.reason}`);
+    }
+  }
+
+  if (onDisk && onDisk.obsidianVault !== undefined) {
+    const checked = checkObsidianVault(onDisk.obsidianVault);
+    if (checked.ok) {
+      merged.obsidianVault = checked.value;
+    } else {
+      console.warn(`[houston] config: obsidianVault ignored: ${checked.reason}`);
+    }
+  }
+
   // One-time migration: back-fill the registry from the legacy single repoPath
   // (or BEADS_REPO / cwd) when no projects array exists yet.
   let migrated = false;
@@ -405,7 +437,7 @@ export function closeActor(assignee: string | null | undefined): string {
   return assignee && assignee !== humanActor && assignee === osUserName() ? assignee : humanActor;
 }
 
-/** Update global settings (actor / allowlist / poll / dashboard / chain). Project registry has its own mutators. */
+/** Update global settings (actor / allowlist / poll / dashboard / chain / notes). Project registry has its own mutators. */
 export function saveConfig(patch: SaveConfigPatch): AppConfig {
   const current = getConfig();
   let normalisedUrl: string | undefined;
@@ -440,6 +472,22 @@ export function saveConfig(patch: SaveConfigPatch): AppConfig {
     }
     normalisedOrgs = checked.value;
   }
+  let normalisedNotesUrl: string | undefined;
+  if (patch.notesServiceUrl !== undefined && patch.notesServiceUrl !== null) {
+    const checked = checkLoopbackServiceUrl(patch.notesServiceUrl);
+    if (!checked.ok) {
+      throw new ConfigError(checked.reason, "invalid_config");
+    }
+    normalisedNotesUrl = checked.url;
+  }
+  let normalisedVault: string | undefined;
+  if (patch.obsidianVault !== undefined && patch.obsidianVault !== null) {
+    const checked = checkObsidianVault(patch.obsidianVault);
+    if (!checked.ok) {
+      throw new ConfigError(checked.reason, "invalid_config");
+    }
+    normalisedVault = checked.value;
+  }
   const next: AppConfig = { ...current };
   if (patch.humanActor !== undefined) next.humanActor = patch.humanActor;
   if (patch.humanAllowlist !== undefined) next.humanAllowlist = patch.humanAllowlist;
@@ -473,12 +521,28 @@ export function saveConfig(patch: SaveConfigPatch): AppConfig {
       next.githubOrgs = normalisedOrgs as string[];
     }
   }
+  if (patch.notesServiceUrl !== undefined) {
+    if (patch.notesServiceUrl === null) {
+      delete next.notesServiceUrl;
+    } else {
+      next.notesServiceUrl = normalisedNotesUrl as string;
+    }
+  }
+  if (patch.obsidianVault !== undefined) {
+    if (patch.obsidianVault === null) {
+      delete next.obsidianVault;
+    } else {
+      next.obsidianVault = normalisedVault as string;
+    }
+  }
   if (patch.humanActor !== undefined) next.humanActorChosen = true;
   const deleteKeys: string[] = [];
   if (patch.workDashboardUrl === null) deleteKeys.push("workDashboardUrl");
   if (patch.snapshotPath === null) deleteKeys.push("snapshotPath");
   if (patch.serviceNowHost === null) deleteKeys.push("serviceNowHost");
   if (patch.githubOrgs === null) deleteKeys.push("githubOrgs");
+  if (patch.notesServiceUrl === null) deleteKeys.push("notesServiceUrl");
+  if (patch.obsidianVault === null) deleteKeys.push("obsidianVault");
   if (deleteKeys.length > 0) {
     persist(next, deleteKeys);
   } else {

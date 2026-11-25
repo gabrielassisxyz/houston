@@ -5,6 +5,13 @@ import { api } from "@/lib/api-client";
 export interface Capabilities {
   workDashboardUrl: string | undefined;
   chain: boolean;
+  notes: boolean;
+  obsidianVault: string | null;
+}
+
+/** The string trimmed, or `undefined` for anything else or a blank one. */
+function nonBlank(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
 }
 
 /**
@@ -15,18 +22,22 @@ export interface Capabilities {
  * retries when the read fails.
  *
  * A successful body without a string `workDashboardUrl` that is non-empty
- * after trimming is normalised to unset, because some browser fixtures
- * answer an unknown read with `{}`. A failed request stays a query error.
+ * after trimming is normalised to unset, and every other field falls back to
+ * off the same way, because some browser fixtures answer an unknown read with
+ * `{}`. A failed request stays a query error.
  */
 export function useCapabilities() {
   return useQuery({
     queryKey: ["capabilities"],
     queryFn: async ({ signal }): Promise<Capabilities> => {
-      const body = await api.capabilities(signal);
-      const raw = (body as { workDashboardUrl?: unknown } | null)?.workDashboardUrl;
-      const chain = (body as { chain?: unknown } | null)?.chain === true;
-      if (typeof raw === "string" && raw.trim() !== "") return { workDashboardUrl: raw.trim(), chain };
-      return { workDashboardUrl: undefined, chain };
+      const body: unknown = await api.capabilities(signal);
+      const fields = body as Partial<Record<keyof Capabilities, unknown>> | null;
+      return {
+        workDashboardUrl: nonBlank(fields?.workDashboardUrl),
+        chain: fields?.chain === true,
+        notes: fields?.notes === true,
+        obsidianVault: nonBlank(fields?.obsidianVault) ?? null,
+      };
     },
     retry: false,
   });
