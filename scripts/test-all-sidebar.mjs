@@ -255,6 +255,52 @@ try {
   checkRequests(scenario.state, "read-only");
   await scenario.context.close();
 
+  step = "configured destinations group";
+  scenario = await openScenario("/all", { configured: true });
+  await card("alpha:a-1").waitFor();
+  const trabalho = page.getByRole("link", { name: "Trabalho", exact: true });
+  await trabalho.waitFor();
+  assert.equal(await page.locator("nav").getByRole("link", { name: "Trabalho", exact: true }).count(), 1, "the Trabalho link sits inside the navigation landmark");
+  const viewsGroup = page.locator('nav [data-nav-group="views"]');
+  const destGroup = page.locator('nav [data-nav-group="destinations"]');
+  assert.equal(await viewsGroup.count(), 1, "one views group");
+  assert.equal(await destGroup.count(), 1, "one destinations group");
+  assert.deepEqual(
+    (await viewsGroup.getByRole("button").allInnerTexts()).map((text) => text.replace(/\s+/g, " ").trim()),
+    ["Board", "List", "Epics 2"],
+    "the view buttons stay one group in their existing order",
+  );
+  const groupOrder = await page.locator("nav [data-nav-group]").evaluateAll((els) => els.map((el) => el.getAttribute("data-nav-group")));
+  assert.deepEqual(groupOrder, ["views", "destinations"], "the destinations group follows the views group");
+  assert.equal(await destGroup.getByRole("link").count(), 1, "Trabalho is the only item of the destinations group");
+  assert.equal((await destGroup.getByRole("link", { name: "Trabalho", exact: true }).innerText()).trim(), "Trabalho", "the destinations item reads Trabalho");
+  assert.equal(await trabalho.getAttribute("aria-current"), null, "no aria-current on /all");
+  await trabalho.click();
+  await page.waitForURL((url) => url.pathname === "/work");
+  assert.equal(await page.getByRole("link", { name: "Trabalho", exact: true }).getAttribute("aria-current"), "page", "aria-current on /work");
+  await scenario.context.close();
+
+  step = "configured mobile sheet closes";
+  scenario = await openScenario("/all", { width: 390, configured: true });
+  await card("alpha:a-1").waitFor();
+  await page.getByRole("button", { name: "Open navigation and project menu" }).click();
+  const sheet2 = page.getByRole("dialog");
+  await sheet2.getByRole("button", { name: SWITCHER, exact: true }).waitFor();
+  const sheetTrabalho = sheet2.getByRole("link", { name: "Trabalho", exact: true });
+  await sheetTrabalho.waitFor();
+  await sheetTrabalho.click();
+  await page.waitForURL((url) => url.pathname === "/work");
+  await sheet2.waitFor({ state: "hidden" });
+  await scenario.context.close();
+
+  step = "unconfigured has no Trabalho";
+  scenario = await openScenario("/all");
+  await card("alpha:a-1").waitFor();
+  await eventually(() => scenario.state.capsAnswers > 0, "the capabilities read answered");
+  assert.equal(await page.getByRole("link", { name: "Trabalho", exact: true }).count(), 0, "no Trabalho link when unconfigured");
+  assert.equal(await page.locator('nav [data-nav-group="destinations"]').count(), 0, "no destinations group when unconfigured");
+  await scenario.context.close();
+
   console.log("PASS all sidebar: entries, header, footer, switcher, resize, narrow screen, read-only, requests");
 } catch (error) {
   console.error(`FAIL at step "${step}": ${error.stack ?? error}`);
