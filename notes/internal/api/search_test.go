@@ -56,6 +56,20 @@ func houOc518IDs(out notesSearchResponse) []string {
 }
 
 // The route answers the pinned shape over live notes only.
+// A limit above the cap is answered at the cap, not refused and not obeyed: the
+// envelope says which limit produced the page.
+func TestHouOc518SearchLimitCappedAt100(t *testing.T) {
+	d := newTestDeps(t, "")
+	houOc518SeedNote(t, d.Graph, "Rollout", "rollout plans", "notes/r.md", "plano", []string{}, []string{})
+	code, out := houOc518Get(t, d, "?q=rollout&limit=500")
+	if code != http.StatusOK {
+		t.Fatalf("GET search with limit=500 = %d, want 200", code)
+	}
+	if out.Limit != 100 {
+		t.Fatalf("limit = %d, want the cap of 100", out.Limit)
+	}
+}
+
 func TestHouOc518SearchShape(t *testing.T) {
 	d := newTestDeps(t, "")
 	id := houOc518SeedNote(t, d.Graph, "Rollout", "rollout plans", "notes/r.md", "plano", []string{"STRY00000001"}, []string{"b", "a"})
