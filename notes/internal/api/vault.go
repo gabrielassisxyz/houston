@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/gabrielassisxyz/houston/notes/internal/notes"
 	"github.com/gabrielassisxyz/houston/notes/internal/vault/frontmatter"
 	"github.com/gabrielassisxyz/houston/notes/internal/vault/reconcile"
+	"github.com/gabrielassisxyz/houston/notes/internal/vault/vaultfile"
 )
 
 // Where POST /api/vault/append puts the block. An ordinary journal grows at the
@@ -189,14 +191,22 @@ func registerVaultRoutes(mux *http.ServeMux, d Deps) {
 			vaultFileWriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-			vaultFileWriteError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
 
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			vaultFileWriteError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		// The reconciler never indexes a zero-byte file or a note that is not
+		// UTF-8, so writing one would answer "saved" for a note the index then
+		// never shows - the orphan the permission check below also refuses.
+		if len(body) == 0 {
+			vaultFileWriteError(w, http.StatusBadRequest, filePath+": the body is empty, and an empty file is never indexed")
+			return
+		}
+		if strings.HasSuffix(fullPath, ".md") && !utf8.Valid(body) {
+			vaultFileWriteError(w, http.StatusBadRequest, filePath+": the body is not valid UTF-8, and such a note is never indexed")
 			return
 		}
 
@@ -274,7 +284,16 @@ func registerVaultRoutes(mux *http.ServeMux, d Deps) {
 			}
 		}
 
-		err = os.WriteFile(fullPath, body, 0644)
+		// Only now, after every check: a refused request must leave nothing
+		// behind, not even the directories its path named.
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+			vaultFileWriteError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		// Through a temporary file and a rename: a crash mid-write must not
+		// leave half a note where the whole one was.
+		err = vaultfile.WriteFileAtomic(fullPath, body, 0o644)
 		if err != nil {
 			vaultFileWriteError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -363,7 +382,7 @@ func registerVaultRoutes(mux *http.ServeMux, d Deps) {
 		default:
 			updated = notes.AppendBlock(string(current), string(block))
 		}
-		if err := os.WriteFile(fullPath, []byte(updated), 0644); err != nil {
+		if err := vaultfile.WriteFileAtomic(fullPath, []byte(updated), 0o644); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

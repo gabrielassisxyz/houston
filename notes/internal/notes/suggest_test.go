@@ -120,3 +120,35 @@ func TestApplySuggestHunks(t *testing.T) {
 		t.Error("out-of-range hunk should be skipped")
 	}
 }
+
+// TestSplitFrontmatterReadsEveryFenceShape covers the splitter the append
+// route uses to keep a block out of the frontmatter. One that misses the block
+// puts the block above the note's id; one that ends it at a line of four
+// dashes puts the block inside the YAML.
+func TestSplitFrontmatterReadsEveryFenceShape(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		fm   string
+	}{
+		{"spaces after both fences", "--- \ntitle: Spaced\n---  \nbody\n", "--- \ntitle: Spaced\n---  \n"},
+		{"four dashes inside the block", "---\ntitle: \"a\n----\nb\"\n---\nbody\n", "---\ntitle: \"a\n----\nb\"\n---\n"},
+		{"CRLF", "---\r\ntitle: Crlf\r\n---\r\nbody\r\n", "---\r\ntitle: Crlf\r\n---\r\n"},
+		{"BOM", "\xEF\xBB\xBF---\ntitle: Bom\n---\nbody\n", "\xEF\xBB\xBF---\ntitle: Bom\n---\n"},
+		{"closing fence ends the file", "---\ntitle: T\n---", "---\ntitle: T\n---"},
+		{"no block", "body\n", ""},
+		// An unterminated block is all body: the present answer.
+		{"unterminated block", "---\ntitle: never closed\nbody\n", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fm, body := SplitFrontmatter(tc.in)
+			if fm != tc.fm {
+				t.Errorf("fm = %q, want %q", fm, tc.fm)
+			}
+			if fm+body != tc.in {
+				t.Errorf("fm+body = %q, want the input %q back", fm+body, tc.in)
+			}
+		})
+	}
+}

@@ -571,41 +571,59 @@ func TestResolvePermission(t *testing.T) {
 	}
 }
 
-// TestOnCreate_InvalidPermissionRefused verifies that a typo'd permission value
-// fails the reconcile rather than silently reading as permissive at the surface.
-func TestOnCreate_InvalidPermissionRefused(t *testing.T) {
+// TestOnCreate_UnknownPermissionIndexesAsAsk verifies that a typo'd permission
+// value no longer hides the note: it is indexed with the most restrictive
+// known value, "ask", never with what the file says, and the file is reported
+// so the typo is still seen. This used to refuse the create outright.
+func TestOnCreate_UnknownPermissionIndexesAsAsk(t *testing.T) {
 	g := testutil.NewInMemoryTestGraph(t)
 	ctx := context.Background()
 	vault := newVaultDir(t)
 
-	path := filepath.Join(vault, "typo.md")
-	writeFile(t, path, "---\nid: perm-typo\ntitle: Typo\npermission: edti\n---\n\nBody.\n")
+	for _, value := range []string{"edti", "readonly"} {
+		t.Run(value, func(t *testing.T) {
+			id := "perm-" + value
+			name := value + ".md"
+			path := filepath.Join(vault, name)
+			writeFile(t, path, "---\nid: "+id+"\ntitle: Typo\nauthor: da\npermission: "+value+"\n---\n\nBody.\n")
 
-	rec := reconcile.New(g, vault)
-	if err := rec.OnCreate(ctx, path); err == nil {
-		t.Fatal("expected OnCreate to fail on an unrecognised permission value")
-	}
+			rec := reconcile.New(g, vault)
+			if err := rec.OnCreate(ctx, path); err != nil {
+				t.Fatalf("OnCreate: %v", err)
+			}
+			assertNotePermission(t, g, id, "ask")
+			if _, found, err := reconcile.Lookup(ctx, g, name); err != nil || !found {
+				t.Fatalf("the note must be indexed (found=%v, err=%v)", found, err)
+			}
+			reps := rec.Reports()
+			if len(reps) != 1 || reps[0].Path != name || reps[0].Kind != reconcile.ReportUnknownPermission {
+				t.Fatalf("reports = %+v, want one unknown_permission report for %s", reps, name)
+			}
 
-	// Nothing must have been written: the node and the path cache both stay empty.
-	err := g.DoRead(ctx, func(tx *graph.ReadTx) error {
-		var count int
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM nodes`).Scan(&count); err != nil {
-			return err
-		}
-		if count != 0 {
-			t.Errorf("node count = %d, want 0 after refused create", count)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("DoRead: %v", err)
-	}
-	_, found, err := reconcile.Lookup(ctx, g, "typo.md")
-	if err != nil {
-		t.Fatalf("Lookup: %v", err)
-	}
-	if found {
-		t.Error("path cache should be empty after a refused create")
+			// A restart's cold start reaches the unchanged file through no
+			// event, and must still report it.
+			fresh := reconcile.New(g, vault)
+			if err := fresh.ColdStart(ctx); err != nil {
+				t.Fatalf("ColdStart: %v", err)
+			}
+			found := false
+			for _, rep := range fresh.Reports() {
+				found = found || (rep.Path == name && rep.Kind == reconcile.ReportUnknownPermission)
+			}
+			if !found {
+				t.Fatalf("a cold start lost the report; reports = %+v", fresh.Reports())
+			}
+
+			// Fixing the value clears the report.
+			writeFile(t, path, "---\nid: "+id+"\ntitle: Typo\nauthor: da\npermission: edit\n---\n\nBody.\n")
+			if err := rec.OnChange(ctx, path); err != nil {
+				t.Fatalf("OnChange: %v", err)
+			}
+			assertNotePermission(t, g, id, "edit")
+			if reps := rec.Reports(); len(reps) != 0 {
+				t.Fatalf("reports after the fix = %+v, want none", reps)
+			}
+		})
 	}
 }
 
@@ -788,9 +806,13 @@ func TestOnCreate_DanglingPromotedOnArrival(t *testing.T) {
 // insert, or the rollback being asserted never has anything to undo.
 //
 // This used to be injected with a duplicate node id, which stopped failing once
-// OnCreate learned to adopt a live node absent from the cache. The property
-// under test was never "an id clash errors" - it is "a mid-transaction failure
-// leaves nothing behind" - so the trigger moved and the assertions stayed.
+// OnCreate learned to adopt a live node absent from the cache, and then with a
+// path squatted by another uuid, which stopped failing once a path replaced in
+// place could be taken over. The property under test was never "a clash
+// errors" - it is "a mid-transaction failure leaves nothing behind" - so the
+// trigger moved again and the assertions stayed: the path-cache insert now
+// fails on an injected SQLite trigger, after the node and the takeover of the
+// squatted path have both been written inside the transaction.
 func TestOnCreate_RollbackOnFailure(t *testing.T) {
 	g := testutil.NewInMemoryTestGraph(t)
 	ctx := context.Background()
@@ -800,13 +822,20 @@ func TestOnCreate_RollbackOnFailure(t *testing.T) {
 	if err := reconcile.Upsert(ctx, g, squatter, "clash.md", "some-hash"); err != nil {
 		t.Fatalf("squat the path: %v", err)
 	}
+	if err := g.DoWrite(ctx, func(tx *graph.WriteTx) error {
+		_, err := tx.Exec(`CREATE TRIGGER refuse_path_insert BEFORE INSERT ON note_paths
+			BEGIN SELECT RAISE(ABORT, 'injected path-cache failure'); END`)
+		return err
+	}); err != nil {
+		t.Fatalf("install the failing trigger: %v", err)
+	}
 
 	path := filepath.Join(vault, "clash.md")
 	writeFile(t, path, "---\nid: fresh-id\ntitle: Clash\n---\n\nBody.\n")
 
 	rec := reconcile.New(g, vault)
 	if err := rec.OnCreate(ctx, path); err == nil {
-		t.Fatal("expected OnCreate to fail: the path is already claimed by another uuid")
+		t.Fatal("expected OnCreate to fail: the path-cache insert is refused")
 	}
 
 	// The cache must still hold the squatter, never the half-written note.
