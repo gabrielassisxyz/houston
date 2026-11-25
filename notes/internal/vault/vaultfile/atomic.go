@@ -13,9 +13,11 @@ import (
 // client takes it for a note during the moment it exists.
 const tempPattern = ".houston-tmp-*"
 
-// The two steps a test needs to make fail. Production never reassigns them.
+// The steps a test needs to make fail. Production never reassigns them.
 var (
 	writeTemp  = func(f *os.File, data []byte) (int, error) { return f.Write(data) }
+	syncTemp   = (*os.File).Sync
+	closeTemp  = (*os.File).Close
 	renameTemp = os.Rename
 )
 
@@ -59,10 +61,12 @@ func WriteFileAtomic(path string, data []byte, defaultMode fs.FileMode) (err err
 	if _, err = writeTemp(tmp, data); err != nil {
 		return fmt.Errorf("vaultfile: write %q: %w", tmpName, err)
 	}
-	if err = tmp.Sync(); err != nil {
+	if err = syncTemp(tmp); err != nil {
 		return fmt.Errorf("vaultfile: sync %q: %w", tmpName, err)
 	}
-	if err = tmp.Close(); err != nil {
+	// A failed close can be the first report of a failed write, so its error
+	// counts as one.
+	if err = closeTemp(tmp); err != nil {
 		return fmt.Errorf("vaultfile: close %q: %w", tmpName, err)
 	}
 	if err = renameTemp(tmpName, target); err != nil {

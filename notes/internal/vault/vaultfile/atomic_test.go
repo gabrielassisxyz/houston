@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -121,14 +122,22 @@ func TestWriteFileAtomicLeavesTheOriginalWhenAStepFails(t *testing.T) {
 				return n, injected
 			}
 		}},
+		{"sync", func() {
+			syncTemp = func(*os.File) error { return injected }
+		}},
+		{"close", func() {
+			closeTemp = func(*os.File) error { return injected }
+		}},
 		{"rename", func() {
 			renameTemp = func(string, string) error { return injected }
 		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			origWrite, origRename := writeTemp, renameTemp
-			t.Cleanup(func() { writeTemp, renameTemp = origWrite, origRename })
+			origWrite, origSync, origClose, origRename := writeTemp, syncTemp, closeTemp, renameTemp
+			t.Cleanup(func() {
+				writeTemp, syncTemp, closeTemp, renameTemp = origWrite, origSync, origClose, origRename
+			})
 			tc.inject()
 
 			dir := t.TempDir()
@@ -174,4 +183,25 @@ func TestWriteFileAtomicWritesThroughASymlink(t *testing.T) {
 		t.Errorf("target content = %q, want %q", got, "new\n")
 	}
 	assertOnlyEntries(t, dir, "real.md", "link.md")
+}
+
+// TestWriteFileAtomicHidesItsTemporaryFile: the watcher, the index, Obsidian
+// and sync clients all skip a dot-file that does not end in .md, so the
+// temporary file is never taken for a note while it exists.
+func TestWriteFileAtomicHidesItsTemporaryFile(t *testing.T) {
+	origRename := renameTemp
+	t.Cleanup(func() { renameTemp = origRename })
+	var tmpName string
+	renameTemp = func(from, to string) error {
+		tmpName = filepath.Base(from)
+		return origRename(from, to)
+	}
+
+	dir := t.TempDir()
+	if err := WriteFileAtomic(filepath.Join(dir, "note.md"), []byte("x\n"), 0o644); err != nil {
+		t.Fatalf("WriteFileAtomic: %v", err)
+	}
+	if !strings.HasPrefix(tmpName, ".houston-tmp-") || strings.HasSuffix(tmpName, ".md") {
+		t.Errorf("temporary file %q must be a .houston-tmp- dot-file that does not end in .md", tmpName)
+	}
 }
