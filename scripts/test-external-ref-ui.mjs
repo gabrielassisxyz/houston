@@ -1,6 +1,7 @@
-// external_ref in the interface: the drawer, the create form, the board and list search and the
-// epic view's filter. Every API request is answered from the fixtures below, the viewer mode
-// included, so no tracker is read or written and the script passes under both launch modes.
+// external_ref in the interface: the drawer, the create form, the board and list search, the epic
+// view's filter and the command palette. Every API request is answered from the fixtures below,
+// the viewer mode included, so no tracker is read or written and the script passes under both
+// launch modes.
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 
@@ -167,6 +168,17 @@ const epicFilter = () => page.getByRole('textbox', { name: FILTER, exact: true }
 const epicsHeader = () => page.locator('header').filter({ has: page.getByRole('heading', { name: 'Epics', exact: true }) });
 const epicCount = () => epicsHeader().locator('span').first().innerText();
 const param = (name) => new URL(page.url()).searchParams.get(name);
+
+const paletteItems = () => page.locator('[cmdk-item]').allInnerTexts();
+async function paletteBeads(search) {
+  await page.locator('[cmdk-input]').fill(search);
+  await page.waitForTimeout(200);
+  return (await paletteItems()).map((text) => text.match(/\b(?:hs|ep)-\w+/)?.[0]).filter(Boolean);
+}
+async function openPalette() {
+  await page.keyboard.press('Control+k');
+  await page.locator('[cmdk-input]').waitFor();
+}
 
 try {
   // ── Drawer, read mode ──────────────────────────────────────────────────────
@@ -444,9 +456,51 @@ try {
     assert.ok(width >= 200, `${step}: the header wraps and the filter keeps its width (${width})`);
   }
 
+  // ── Command palette ────────────────────────────────────────────────────────
+  step = 'palette';
+  const holds = (text, word) => {
+    let at = 0;
+    for (const letter of text.toLowerCase()) if (letter === word[at]) at += 1;
+    return at === word.length;
+  };
+  const unreferenced = projectBeads().filter((b) => !b.external_ref?.trim());
+  for (const b of unreferenced) {
+    for (const word of ['null', 'undefined']) {
+      assert.equal(holds(`recent ${b.id} ${b.title}`, word), false, `fixture: ${b.id} must not spell "${word}"`);
+    }
+  }
+  await open('/p/demo?view=board');
+  await card('hs-1').waitFor();
+  await openPalette();
+  assert.deepEqual(await paletteBeads('STRY00000001'), ['hs-1'], 'the palette finds a bead by its reference');
+  assert.deepEqual(await paletteBeads('STRY00000002'), ['hs-2'], 'and by a reference stored with blanks');
+  assert.deepEqual(await paletteBeads('STRY00000555'), ['ep-2'], 'and an epic by its reference');
+  for (const id of ['hs-3', 'hs-4', 'hs-5']) {
+    const { title } = unreferenced.find((b) => b.id === id);
+    assert.ok((await paletteBeads(title)).includes(id), `${id} is listed by its title`);
+  }
+  for (const word of ['undefined', 'null']) {
+    assert.deepEqual(await paletteBeads(word), [], `no bead without a reference matches "${word}"`);
+  }
+
+  // ── A story number typed in the drawer finds its epic ──────────────────────
+  step = 'from the drawer to the epic view and the palette';
+  await open('/p/demo?view=epics');
+  await page.getByRole('button', { name: 'Open details for ep-1', exact: true }).click();
+  await editButton().click();
+  await refInput().fill('STRY00000040');
+  await saved('ep-1', () => saveButton().click());
+  await drawer().getByTitle('Close', { exact: true }).click();
+  await drawer().waitFor({ state: 'detached' });
+  await epicFilter().fill('STRY00000040');
+  await expectEpics(['ep-1'], 'the epic view finds it');
+  await epicFilter().blur();
+  await openPalette();
+  assert.deepEqual(await paletteBeads('STRY00000040'), ['ep-1'], 'the palette finds it');
+
   assert.deepEqual(unrouted, [], 'every request had a fixture');
   assert.deepEqual(errors, [], 'no page error');
-  console.log('PASS external_ref UI: drawer, create form, board and list search, epic filter and jump, narrow header and shortcuts');
+  console.log('PASS external_ref UI: drawer, create form, board and list search, epic filter and jump, narrow header, shortcuts and palette');
 } catch (error) {
   // First, and on one line: it is what scripts/mutate-check.py reports as the reason.
   console.error(`Error at step "${step}": ${error.message.split('\n')[0]}`);
