@@ -4,12 +4,38 @@
 package wikilink
 
 import (
+	"path"
 	"regexp"
 	"strings"
 )
 
+// nonNoteExts are file extensions treated as attachments rather than notes,
+// matching Obsidian's attachment types. A dot alone never disqualifies a
+// target (e.g. [[2026.11.25]] and [[v1.2]] remain note links).
+var nonNoteExts = map[string]struct{}{
+	".png":  {},
+	".jpg":  {},
+	".jpeg": {},
+	".gif":  {},
+	".svg":  {},
+	".webp": {},
+	".pdf":  {},
+	".mp3":  {},
+	".mp4":  {},
+	".wav":  {},
+	".csv":  {},
+	".xlsx": {},
+	".docx": {},
+	".pptx": {},
+	".zip":  {},
+	".tar":  {},
+	".gz":   {},
+}
+
 // linkRe matches [[target]] or [[target|alias]].
-// Target groups: [[, optional uuid-, the target, optional |alias, ]].
+// Target groups: [[, the target, optional |alias, ]].
+// Go's RE2 has no lookbehind, so Parse rejects embeds (![[...]]) by checking
+// the byte immediately before each match.
 var linkRe = regexp.MustCompile(`\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]`)
 
 // Link is a parsed wikilink with position info.
@@ -30,11 +56,54 @@ const (
 	KindTitle TargetKind = "title"
 )
 
-// ClassifyTarget determines the TargetKind based on the raw target string.
+// NormalizeTarget turns a raw wikilink target, relative note path, title or id
+// into the canonical lower-case key shared by resolution, dangling_links storage
+// and dangling-link promotion.
+//
+// Rules:
+//   - Anchor-only targets starting with '#' or '^' ([[#Heading]], [[^block]])
+//     refer inside the source note itself and normalize to "".
+//   - Heading and block anchors are stripped from the first '#' onward
+//     ([[Note#Heading]] and [[Note#^block]] -> "note"), while '^' elsewhere is
+//     kept as part of the name ([[2^n]] -> "2^n").
+//   - Backslashes are normalized to '/'.
+//   - Case is folded to lower case, and one trailing ".md" suffix is stripped.
+func NormalizeTarget(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" || strings.HasPrefix(s, "#") || strings.HasPrefix(s, "^") {
+		return ""
+	}
+	if idx := strings.IndexByte(s, '#'); idx >= 0 {
+		s = strings.TrimSpace(s[:idx])
+	}
+	if s == "" || strings.HasPrefix(s, "^") {
+		return ""
+	}
+	s = strings.ReplaceAll(s, "\\", "/")
+	s = strings.ToLower(s)
+	s = strings.TrimSuffix(s, ".md")
+	return s
+}
+
+// hasNonNoteExt reports whether target (ignoring any #anchor) ends in a known
+// non-note attachment extension.
+func hasNonNoteExt(target string) bool {
+	s := strings.TrimSpace(target)
+	if idx := strings.IndexByte(s, '#'); idx >= 0 {
+		s = strings.TrimSpace(s[:idx])
+	}
+	s = strings.ReplaceAll(s, "\\", "/")
+	ext := strings.ToLower(path.Ext(s))
+	_, ok := nonNoteExts[ext]
+	return ok
+}
+
+// ClassifyTarget determines the TargetKind based on the target string.
 // UUIDs are strings that parse as a valid UUID; everything else is a stem
-// (the resolver will fall back to title if stem lookup fails).
+// (the resolver will fall back to title if path/stem lookup fails).
 func ClassifyTarget(target string) TargetKind {
-	if isUUID(target) {
+	norm := NormalizeTarget(target)
+	if isUUID(norm) {
 		return KindUUID
 	}
 	return KindStem
@@ -69,9 +138,16 @@ func Parse(content string) []Link {
 			if len(m) < 4 {
 				continue
 			}
+			// Embeds (![[...]]) are not note links.
+			if m[0] > 0 && cleanLine[m[0]-1] == '!' {
+				continue
+			}
 			// m[0], m[1] = full match; m[2], m[3] = group 1 (target); m[4], m[5] = group 2 (alias)
 			targetStart, targetEnd := m[2], m[3]
 			target := cleanLine[targetStart:targetEnd]
+			if hasNonNoteExt(target) || NormalizeTarget(target) == "" {
+				continue
+			}
 			alias := ""
 			if m[4] >= 0 && m[5] >= 0 {
 				alias = cleanLine[m[4]:m[5]]
