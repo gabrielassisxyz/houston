@@ -57,7 +57,7 @@ try {
  await page.keyboard.press('Space'); await item('epic-child').waitFor();
  await item('epic').focus(); await page.keyboard.press('Space');
  assert.equal(await page.locator('[data-keyboard-bead-id="epic-child"]').count(),0);
- await chord('b');
+ await chord('b'); await page.getByRole('heading',{name:'Board',exact:true}).waitFor();
  await page.keyboard.press('/');
  const search=page.locator('input[data-search]'); await search.fill('jkgf');
  assert.equal(await search.inputValue(),'jkgf');

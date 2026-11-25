@@ -14,6 +14,8 @@ const patchSchema = z.object({
   snapshotPath: z.string().nullable().optional(),
   serviceNowHost: z.string().nullable().optional(),
   githubOrgs: z.array(z.string()).nullable().optional(),
+  notesServiceUrl: z.string().nullable().optional(),
+  obsidianVault: z.string().nullable().optional(),
 });
 
 export async function GET() {
@@ -31,6 +33,12 @@ export async function PUT(req: Request) {
       ...(patch.snapshotPath === "" || patch.snapshotPath === null ? { snapshotPath: null } : {}),
       ...(patch.serviceNowHost === "" || patch.serviceNowHost === null
         ? { serviceNowHost: null }
+        : {}),
+      ...(patch.notesServiceUrl === "" || patch.notesServiceUrl === null
+        ? { notesServiceUrl: null }
+        : {}),
+      ...(patch.obsidianVault === "" || patch.obsidianVault === null
+        ? { obsidianVault: null }
         : {}),
     };
     const next = saveConfig(normalized);

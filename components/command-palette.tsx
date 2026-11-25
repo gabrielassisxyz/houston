@@ -395,9 +395,11 @@ function BeadItem({
   onSelect: () => void;
   valuePrefix?: string;
 }) {
+  // Appended only when there is one: the palette would otherwise match "undefined" or "null".
+  const externalRef = bead.external_ref?.trim();
   return (
     <Command.Item
-      value={`${valuePrefix}${bead.id} ${bead.title}`}
+      value={`${valuePrefix}${bead.id} ${bead.title}${externalRef ? ` ${externalRef}` : ""}`}
       onSelect={onSelect}
       className="flex cursor-pointer items-center gap-[10px] rounded-[8px] px-3 py-[7px] text-[13.5px] data-[selected=true]:bg-[var(--surface-2)]"
     >

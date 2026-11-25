@@ -25,6 +25,7 @@ const {
   checkGithubOrgs,
   checkPipelineRepo,
   checkTicketNumber,
+  checkObsidianVault,
 } = load('config-values');
 
 function accepts(result, expectedValue, label) {
@@ -113,5 +114,20 @@ refuses(checkTicketNumber('1'), 'ticket digits without prefix');
 refuses(checkTicketNumber('CHG1?x=1'), 'ticket number with extra characters');
 refuses(checkTicketNumber('ABCDEFGHIJKLM1'), '13-letter ticket prefix');
 refuses(checkTicketNumber(`A${'0'.repeat(21)}`), '21-digit ticket suffix');
+
+// obsidianVault: accepted, stored trimmed.
+accepts(checkObsidianVault('Work Notes'), 'Work Notes', 'vault name with a space');
+accepts(checkObsidianVault('notas — implementação'), 'notas — implementação', 'vault name outside ASCII');
+accepts(checkObsidianVault('  Work Notes \n'), 'Work Notes', 'vault name with surrounding whitespace');
+
+// obsidianVault: refused per rule.
+refuses(checkObsidianVault(''), 'empty vault name');
+refuses(checkObsidianVault('   '), 'blank vault name');
+refuses(checkObsidianVault('Work\tNotes'), 'vault name containing a tab');
+refuses(checkObsidianVault('Work\0'), 'vault name ending in a NUL');
+refuses(checkObsidianVault('Work\x7fNotes'), 'vault name containing a DEL');
+refuses(checkObsidianVault(42), 'numeric vault name');
+refuses(checkObsidianVault(null), 'null vault name');
+refuses(checkObsidianVault(['Work']), 'vault name in a list');
 
 console.log('PASS (unit): config value validators accept and refuse every rule');
