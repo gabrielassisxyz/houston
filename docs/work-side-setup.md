@@ -9,13 +9,16 @@ macOS workstation.
   or 24; that warning is expected and harmless.
 - **`br`** (`beads_rust`) installed and executable.
 - **`git`** installed and executable.
+- **Go 1.26 or later** for the notes service. The first notes build downloads the module's
+  dependencies through the Go module proxy, so it needs network access once.
 
-Verify all three before cloning:
+Verify all four before cloning:
 
 ```bash
 node --version
 br --version
 git --version
+go version
 ```
 
 ## Clone and build
@@ -80,6 +83,48 @@ launchctl print "gui/$(id -u)/houston.hub"
 ```
 
 Confirm that the reported PID changes and the app answers again on `http://127.0.0.1:3300`.
+
+## Notes service
+
+The notes service indexes the work vault and serves it over loopback on `127.0.0.1`. One install
+command builds it from this checkout and installs it as the `houston.notes` login agent beside
+`houston.hub`, with its vault, database, port and a raised open-file limit (macOS holds one
+kqueue descriptor per note against a default soft limit of 256).
+
+### First run
+
+1. Commit the vault's git working tree so the first index starts from a clean state.
+2. Build once and run the preflight check:
+   ```bash
+   cd notes
+   go build -o bin/houston ./cmd/houston
+   HOUSTON_VAULT=/path/to/vault notes/bin/houston preflight
+   ```
+   Fix every error the preflight reports before continuing.
+3. Install both agents from the checkout:
+   ```bash
+   scripts/install-services.sh --notes-vault /path/to/vault
+   ```
+   Optional flags: `--notes-db <absolute path>` (default
+   `${XDG_STATE_HOME:-$HOME/.local/state}/houston/notes.db`) and
+   `--notes-port <n>` (default `3301`). The script builds `notes/bin/houston` from the
+   checkout's own Go module, boots `houston.notes` out before rebuilding, writes
+   `$HOME/Library/LaunchAgents/houston.notes.plist` to run
+   `notes/bin/houston serve` with `HOUSTON_VAULT`, `HOUSTON_DB`,
+   `HOUSTON_ADDR=127.0.0.1:<port>`, `XDG_CONFIG_HOME` and a `PATH`, logs to
+   `$HOME/Library/Logs/houston/notes.log`, sets `RunAtLoad` and `KeepAlive`, and raises the
+   open-file limit (`16384` soft, `65536` hard `NumberOfFiles`).
+4. Set `notesServiceUrl` (`http://127.0.0.1:3301/`) and `obsidianVault` through
+   `PUT /api/config`, never by editing `config.json` while the hub runs, which it caches.
+5. Review the id injection as one commit.
+6. Keep the vault folder fully downloaded in the sync client so the watcher sees every note.
+7. Check the process's open-file limit covers the vault.
+8. Updates go through `scripts/update.sh`, which rebuilds the notes binary and restarts
+   `houston.notes` beside the hub.
+
+Re-running `scripts/install-services.sh --notes-vault <dir>` is idempotent. Uninstalling only
+the notes agent is `launchctl bootout gui/$(id -u)/houston.notes` plus removing
+`~/Library/LaunchAgents/houston.notes.plist`; the hub agent is untouched.
 
 ## Updating
 
