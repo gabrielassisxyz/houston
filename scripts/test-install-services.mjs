@@ -446,6 +446,14 @@ try {
       /must not equal or lie inside/i,
       "--notes-db inside vault via dot-dot",
     );
+    // A path that only reaches the vault once ".." is resolved: without the
+    // normalisation its text does not start with the vault, so this case is
+    // what proves the ".." handling, which the case above does not.
+    mustFail(
+      ["--print-notes", "--notes-vault", "/tmp/v", "--notes-db", "/tmp/w/../v/notes.db", "--checkout", checkout, "--path", servicePath],
+      /must not equal or lie inside/i,
+      "--notes-db that reaches the vault only through dot-dot",
+    );
     mustFail(
       ["--print-notes", "--notes-vault", "/tmp/v", "--checkout", checkout, "--path", servicePath],
       /XDG_STATE_HOME must be an absolute path/i,
