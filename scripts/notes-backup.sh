@@ -62,9 +62,11 @@ fi
 mv -f "$PARTIAL" "$FINAL" || die "could not rename $PARTIAL to $FINAL"
 
 # Keep the seven most recent notes-YYYY-MM-DD.db by name (ISO dates sort in
-# time order) and delete the older ones, touching no other file.
+# time order) and delete the older ones, touching no other file. The glob names
+# the date's digits: a loose notes-*.db would count an undated file such as
+# notes-archive.db as the newest copy and delete a real one in its place.
 shopt -s nullglob
-copies=( "$BACKUP_DIR"/notes-*.db )
+copies=( "$BACKUP_DIR"/notes-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].db )
 shopt -u nullglob
 
 if [ "${#copies[@]}" -gt 7 ]; then

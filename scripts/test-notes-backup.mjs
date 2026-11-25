@@ -37,6 +37,11 @@ try {
   }
   const unrelated = path.join(backupDir, "keep.txt");
   fs.writeFileSync(unrelated, "do not touch\n");
+  // Shaped like a copy but carrying no date, so it is not one: retention must neither count
+  // it nor delete it. It sorts after every dated name, which is where a loose glob hurts.
+  const undated = path.join(backupDir, "notes-archive.db");
+  fs.writeFileSync(undated, "not a daily copy\n");
+  const isDailyCopy = (f) => /^notes-\d{4}-\d{2}-\d{2}\.db$/.test(f);
 
   // A stale partial from a failed run is removed by the next run.
   const stalePartial = path.join(backupDir, `.notes-${today}.db.partial`);
@@ -56,7 +61,7 @@ try {
   assert.equal(row, "hello", "backup holds the row");
 
   // Exactly seven notes-*.db remain: today's and the six newest seeded.
-  const copies = fs.readdirSync(backupDir).filter((f) => f.startsWith("notes-") && f.endsWith(".db")).sort();
+  const copies = fs.readdirSync(backupDir).filter(isDailyCopy).sort();
   const expected = [
     "notes-2020-01-04.db",
     "notes-2020-01-05.db",
@@ -70,12 +75,13 @@ try {
 
   // The unrelated file survives and no .partial is left.
   assert.equal(fs.readFileSync(unrelated, "utf8"), "do not touch\n", "unrelated file survives");
+  assert.equal(fs.readFileSync(undated, "utf8"), "not a daily copy\n", "an undated notes-*.db survives");
   const partials = fs.readdirSync(backupDir).filter((f) => f.endsWith(".partial"));
   assert.deepEqual(partials, [], "no .partial is left");
 
   // A second run on the same day succeeds and still leaves seven.
   execFileSync("bash", [backupScript, dbPath, syncDir], { stdio: "pipe" });
-  const copies2 = fs.readdirSync(backupDir).filter((f) => f.startsWith("notes-") && f.endsWith(".db")).sort();
+  const copies2 = fs.readdirSync(backupDir).filter(isDailyCopy).sort();
   assert.deepEqual(copies2, expected, "second run on the same day still leaves seven");
   const integrity2 = execFileSync("sqlite3", [finalPath, "PRAGMA integrity_check;"], { encoding: "utf8" }).trim();
   assert.equal(integrity2, "ok", "second run leaves a good copy");
