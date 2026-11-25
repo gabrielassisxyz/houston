@@ -168,7 +168,7 @@ func finishNodeCreate(ctx context.Context, tx *graph.WriteTx, id string, attrs [
 
 	result, err := tx.Exec(
 		`INSERT INTO nodes_fts(title, attrs) VALUES (?, ?)`,
-		fts.Title, ftsAttrs,
+		stripFTSIndexMarkers(fts.Title), stripFTSIndexMarkers(ftsAttrs),
 	)
 	if err != nil {
 		return fmt.Errorf("finishNodeCreate: insert fts: %w", err)
@@ -298,7 +298,7 @@ func updateNode(ctx context.Context, tx *graph.WriteTx, spec NodeSpec, author Au
 
 		_, err = tx.Exec(
 			`INSERT INTO nodes_fts(rowid, title, attrs) VALUES (?, ?, ?)`,
-			ftsRowid.Int64, fts.Title, ftsAttrs,
+			ftsRowid.Int64, stripFTSIndexMarkers(fts.Title), stripFTSIndexMarkers(ftsAttrs),
 		)
 		if err != nil {
 			return fmt.Errorf("updateNode: insert fts: %w", err)
@@ -732,14 +732,14 @@ func reviveNote(ctx context.Context, tx *graph.WriteTx, id, stem, title string, 
 		_, _ = tx.Exec(`DELETE FROM nodes_fts WHERE rowid = ?`, ftsRowid.Int64)
 		if _, err := tx.Exec(
 			`INSERT INTO nodes_fts(rowid, title, attrs) VALUES (?, ?, ?)`,
-			ftsRowid.Int64, fts.Title, ftsAttrs,
+			ftsRowid.Int64, stripFTSIndexMarkers(fts.Title), stripFTSIndexMarkers(ftsAttrs),
 		); err != nil {
 			return fmt.Errorf("reviveNote: re-insert fts (rowid) %q: %w", id, err)
 		}
 	} else {
 		result, err := tx.Exec(
 			`INSERT INTO nodes_fts(title, attrs) VALUES (?, ?)`,
-			fts.Title, ftsAttrs,
+			stripFTSIndexMarkers(fts.Title), stripFTSIndexMarkers(ftsAttrs),
 		)
 		if err != nil {
 			return fmt.Errorf("reviveNote: insert fts %q: %w", id, err)
@@ -847,6 +847,15 @@ func diffTags(prev, next []string) (add, remove []string) {
 		}
 	}
 	return
+}
+
+// stripFTSIndexMarkers removes the snippet match markers STX and ETX from
+// text before it is written into nodes_fts, so snippet() output never carries
+// markers stored in a note's title, body or tags. The stored node keeps its
+// bytes; only the index is stripped.
+func stripFTSIndexMarkers(s string) string {
+	s = strings.ReplaceAll(s, "\x02", "")
+	return strings.ReplaceAll(s, "\x03", "")
 }
 
 // snapshotJSON marshals node state into a JSON revision diff payload.
