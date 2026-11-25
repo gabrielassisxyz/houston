@@ -2,11 +2,14 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/gabrielassisxyz/houston/notes/internal/vault/reconcile"
 )
 
 func writeNoteWithPermission(t *testing.T, d Deps, permission string) *httptest.ResponseRecorder {
@@ -57,5 +60,29 @@ func TestVaultWriteAcceptsValidPermission(t *testing.T) {
 				t.Errorf("an accepted write must leave the file: %v", err)
 			}
 		})
+	}
+}
+
+// TestNoteIndexServesANoteWithAnUnknownPermission drives the reconciler over a
+// file the write route would have refused - a note typed by hand, or synced
+// in - and reads the index back. The note used to be skipped, and one unknown
+// value stored in the graph made GET /api/notes answer 500 for every note. It
+// is listed now, as "ask".
+func TestNoteIndexServesANoteWithAnUnknownPermission(t *testing.T) {
+	root := t.TempDir()
+	d := newTestDeps(t, root)
+
+	path := filepath.Join(root, "typed-by-hand.md")
+	note := "---\nid: perm-unknown-1\ntitle: Typed by hand\nauthor: da\npermission: readonly\n---\n\nBody.\n"
+	if err := os.WriteFile(path, []byte(note), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconcile.New(d.Graph, root).OnCreate(context.Background(), path); err != nil {
+		t.Fatalf("OnCreate: %v", err)
+	}
+
+	index := getNoteIndex(t, d)
+	if got := entryByPath(t, index, "typed-by-hand.md").Permission; got != "ask" {
+		t.Errorf("permission = %q, want %q", got, "ask")
 	}
 }
