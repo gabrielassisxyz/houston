@@ -25,6 +25,9 @@ async function installFixtures(context) {
     unexpected.push(route.request().url());
     return route.fulfill({ status: 500, json: { error: "not a fixture" } });
   });
+  await context.route("**/api/capabilities", (route) => {
+    return route.fulfill({ json: { workDashboardUrl: null } });
+  });
   await context.route("**/api/projects", (route) => {
     return route.fulfill({ json: { projects } });
   });

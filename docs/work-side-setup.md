@@ -84,6 +84,83 @@ launchctl print "gui/$(id -u)/houston.hub"
 
 Confirm that the reported PID changes and the app answers again on `http://127.0.0.1:3300`.
 
+## Work dashboard
+
+Houston frames the work dashboard, a page served by a local collector program on the work machine,
+at the route `/work`. The collector's address is stored in `config.json` as `workDashboardUrl`.
+
+### Address rules
+
+`workDashboardUrl` must be an `http` or `https` address on exactly `127.0.0.1`
+(`http://127.0.0.1:8000/` is valid; `localhost`, `::1`, `127.0.0.2` and any other host are
+refused), with no credentials, no query and no fragment. The stored value is the parser's
+normalised address, so a bare host and port gains a trailing slash. An invalid value on disk is
+ignored with a warning; an invalid value in `PUT /api/config` is refused with `invalid_config`.
+
+### Where the file lives
+
+The hub reads `$XDG_CONFIG_HOME/houston/config.json` (default `~/.config/houston/config.json`)
+once at startup. That directory is the same `XDG_CONFIG_HOME` value the service definition pins:
+the plist written by [scripts/install-services.sh](../scripts/install-services.sh) sets
+`XDG_CONFIG_HOME` in `EnvironmentVariables`, and the script computes it once from
+`${XDG_CONFIG_HOME:-$HOME/.config}`.
+
+### Set and clear it
+
+While Houston runs, send only `workDashboardUrl` to the config route:
+
+```bash
+curl -X PUT http://127.0.0.1:3300/api/config \
+  -H 'Content-Type: application/json' \
+  -d '{"workDashboardUrl": "http://127.0.0.1:8000/"}'
+```
+
+Clear it the same way:
+
+```bash
+curl -X PUT http://127.0.0.1:3300/api/config \
+  -H 'Content-Type: application/json' \
+  -d '{"workDashboardUrl": ""}'
+```
+
+An empty string removes the key, exactly like `null` does. Any other field sent alongside is
+applied as well, so send only this one key when that is all that should change.
+
+Or stop the service first and edit the file. Unload it with
+`launchctl bootout "gui/$(id -u)/houston.hub"`, never `kill` or `launchctl stop`, which
+`KeepAlive` undoes at once by restarting a stopped service. Edit the existing JSON object without
+replacing the other fields, then load it again with
+`launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/houston.hub.plist"`. The file
+is read once and is not edited while the service runs, as the operational rules below say.
+
+### When the collector is not running
+
+`/work` probes the configured address with `POST /api/work/probe` and keeps the frame unmounted
+until the probe answers. When nothing answers there it shows
+`O painel do trabalho não respondeu em <address>.` with the hint
+`Inicie o servidor do collector e tente de novo.` and a `Tentar de novo` button that probes
+again. When no address is configured it shows `O painel do trabalho não está configurado.` and
+names `workDashboardUrl` with a restart of Houston.
+
+### Collector over https with a keychain-only certificate
+
+When the collector serves `https` with a certificate only the macOS keychain trusts and `/work`
+says the dashboard is not answering, teach the hub's Node to trust the system store. Add
+`NODE_EXTRA_CA_CERTS` or `NODE_OPTIONS=--use-system-ca` to the plist's `EnvironmentVariables`,
+never a bare flag in `ProgramArguments`, which `bin/houston-web.mjs` does not pass on to
+`next start`. Check the edited plist with `plutil -lint`, then reload it with `bootout` followed
+by `bootstrap`. Re-running `scripts/install-services.sh` rewrites the plist and drops the edit,
+so keep the change outside the installer.
+
+### Collector refuses to be framed
+
+When the frame stays blank or shows a refusal (a `403`, say), the collector's own server refuses
+to be framed. `X-Frame-Options` cannot name one allowed origin (its values are `DENY` and
+`SAMEORIGIN`), so an origin-specific allowance is a
+`Content-Security-Policy: frame-ancestors http://127.0.0.1:3300` on that document's response,
+with `X-Frame-Options` removed for it. A check on the request's fetch-metadata headers is relaxed
+the same way, for that document load only.
+
 ## Notes service
 
 The notes service indexes the work vault and serves it over loopback on `127.0.0.1`. One install
@@ -160,7 +237,7 @@ are plain files and stay.
 
 ## Updating
 
-Run [scripts/update.sh](../scripts/update.sh) from anywhere:
+Run [scripts/update.sh](../scripts/update.sh) from the checkout, or by its absolute path:
 
 ```bash
 scripts/update.sh

@@ -12,7 +12,10 @@ import { useResizableWidth } from "@/hooks/use-resizable-width";
 import { cn } from "@/lib/utils";
 import { navViews, type ViewNavItem } from "@/lib/views";
 import { Sheet, SheetContent, SheetDescription, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
-import { Menu } from "lucide-react";
+import { Briefcase, Menu } from "lucide-react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import { useCapabilities } from "@/hooks/use-capabilities";
 
 export interface SidebarProps {
   view?: View;
@@ -50,6 +53,13 @@ export function Sidebar({
     beads.filter(needsHuman).length + beads.filter((b) => readyHumanGate(b, index)).length;
   const game = useGamification(projectId, !!meta?.gamification);
   const { width, startResize } = useSidebarWidth();
+  const pathname = usePathname();
+  const caps = useCapabilities();
+  const workUrl = caps.data?.workDashboardUrl;
+  const viewList = views ?? navViews(!!meta?.gamification);
+  const showViews = viewList.length > 0;
+  const showWork = !!workUrl;
+  const workActive = pathname === "/work";
 
   return (
     <aside
@@ -77,36 +87,61 @@ export function Sidebar({
 
 
       <nav className="flex flex-col gap-[2px]">
-        {(views ?? navViews(!!meta?.gamification)).map((n) => {
-          const active = view === n.key;
-          return (
-              <button
-                key={n.key}
-                onClick={() => onView?.(n.key)}
-              aria-current={active ? "page" : undefined}
+        {showViews ? (
+          <div data-nav-group="views" className="flex flex-col gap-[2px]">
+            {viewList.map((n) => {
+              const active = view === n.key;
+              return (
+                <button
+                  key={n.key}
+                  onClick={() => onView?.(n.key)}
+                  aria-current={active ? "page" : undefined}
+                  className={cn(
+                    "flex w-full items-center gap-[10px] rounded-[9px] px-[10px] py-2 text-left text-[13.5px] transition-colors",
+                    active
+                      ? "bg-[var(--brand-weak)] font-semibold text-[var(--brand)]"
+                      : "font-medium text-[var(--text-2)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]",
+                  )}
+                >
+                  <Icon name={n.icon} size={17} className="flex-shrink-0" />
+                  <span className="flex-1">{n.label}</span>
+                  {n.key === "epics" && epicCount > 0 && (
+                    <span className="font-mono text-[11px] text-[var(--text-3)]">{epicCount}</span>
+                  )}
+                  {n.key === "needsyou" && needsYouCount > 0 && (
+                    <span
+                      className="min-w-[18px] rounded-full px-[6px] py-px text-center text-[11px] font-semibold text-white"
+                      style={{ background: "var(--brand)" }}
+                    >
+                      {needsYouCount}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+        {showViews && showWork ? (
+          <div aria-hidden="true" className="mx-2 my-1 border-t border-border" />
+        ) : null}
+        {showWork ? (
+          <div data-nav-group="destinations" className="flex flex-col gap-[2px]">
+            <Link
+              href="/work"
+              aria-current={workActive ? "page" : undefined}
+              onClick={() => onProjectNavigate?.()}
               className={cn(
                 "flex w-full items-center gap-[10px] rounded-[9px] px-[10px] py-2 text-left text-[13.5px] transition-colors",
-                active
+                workActive
                   ? "bg-[var(--brand-weak)] font-semibold text-[var(--brand)]"
                   : "font-medium text-[var(--text-2)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]",
               )}
             >
-              <Icon name={n.icon} size={17} className="flex-shrink-0" />
-              <span className="flex-1">{n.label}</span>
-              {n.key === "epics" && epicCount > 0 && (
-                <span className="font-mono text-[11px] text-[var(--text-3)]">{epicCount}</span>
-              )}
-              {n.key === "needsyou" && needsYouCount > 0 && (
-                <span
-                  className="min-w-[18px] rounded-full px-[6px] py-px text-center text-[11px] font-semibold text-white"
-                  style={{ background: "var(--brand)" }}
-                >
-                  {needsYouCount}
-                </span>
-              )}
-            </button>
-          );
-        })}
+              <Briefcase size={17} className="flex-shrink-0" aria-hidden="true" />
+              <span className="flex-1">Trabalho</span>
+            </Link>
+          </div>
+        ) : null}
       </nav>
 
       <div className="mt-auto flex flex-col gap-[10px]">
