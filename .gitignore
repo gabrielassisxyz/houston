@@ -72,3 +72,5 @@ next-env.d.ts
 # A plain `go build ./cmd/houston` run inside notes/ leaves a binary
 # notes/houston behind; the Go gate builds with -o /dev/null for the same reason.
 notes/houston
+# The install and update scripts build the notes service's binary here.
+/notes/bin/
