@@ -22,6 +22,7 @@ import (
 	"github.com/gabrielassisxyz/houston/notes/internal/notes"
 	"github.com/gabrielassisxyz/houston/notes/internal/vault/frontmatter"
 	"github.com/gabrielassisxyz/houston/notes/internal/vault/reconcile"
+	"github.com/gabrielassisxyz/houston/notes/internal/vault/vaultfile"
 )
 
 // Where POST /api/vault/append puts the block. An ordinary journal grows at the
@@ -290,7 +291,9 @@ func registerVaultRoutes(mux *http.ServeMux, d Deps) {
 			return
 		}
 
-		err = os.WriteFile(fullPath, body, 0644)
+		// Through a temporary file and a rename: a crash mid-write must not
+		// leave half a note where the whole one was.
+		err = vaultfile.WriteFileAtomic(fullPath, body, 0o644)
 		if err != nil {
 			vaultFileWriteError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -379,7 +382,7 @@ func registerVaultRoutes(mux *http.ServeMux, d Deps) {
 		default:
 			updated = notes.AppendBlock(string(current), string(block))
 		}
-		if err := os.WriteFile(fullPath, []byte(updated), 0644); err != nil {
+		if err := vaultfile.WriteFileAtomic(fullPath, []byte(updated), 0o644); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

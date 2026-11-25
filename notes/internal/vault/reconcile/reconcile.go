@@ -973,7 +973,7 @@ func parseAndInject(absPath string, raw []byte) (*frontmatter.Frontmatter, []byt
 		if err != nil {
 			return nil, nil, fmt.Errorf("inject id: %w", err)
 		}
-		if err := os.WriteFile(absPath, updated, 0o644); err != nil {
+		if err := vaultfile.WriteFileAtomic(absPath, updated, 0o644); err != nil {
 			return nil, nil, fmt.Errorf("write injected id: %w", err)
 		}
 		raw = updated
@@ -1210,8 +1210,8 @@ func resolveTitle(fm *frontmatter.Frontmatter, absPath string) string {
 	return strings.TrimSuffix(base, filepath.Ext(base))
 }
 
-// WriteNoteBody rewrites the body of a note's vault markdown file in place,
-// preserving its frontmatter, so the file (the source of truth) reflects an
+// WriteNoteBody rewrites the body of a note's vault markdown file, preserving
+// its frontmatter, so the file (the source of truth) reflects an
 // in-graph body change. Callers that mutate a note's body directly via
 // nodes.UpdateNote (e.g. ingest/inbox merges) MUST also call this - otherwise
 // the file diverges and the merge is clobbered the next time the file is
@@ -1240,7 +1240,7 @@ func WriteNoteBody(ctx context.Context, g *graph.Graph, vaultRoot, noteID, newBo
 	// off leaves the frontmatter block plus its separator untouched.
 	body := extractBody(raw)
 	prefix := strings.TrimSuffix(string(raw), body)
-	if err := os.WriteFile(full, []byte(prefix+newBody), 0644); err != nil {
+	if err := vaultfile.WriteFileAtomic(full, []byte(prefix+newBody), 0o644); err != nil {
 		return false, fmt.Errorf("reconcile: write note %q: %w", full, err)
 	}
 	return true, nil
