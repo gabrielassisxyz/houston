@@ -166,6 +166,8 @@ func (s *Service) routeEvents(ctx context.Context) {
 				}
 			case watcher.KindDelete:
 				err = s.r.OnDelete(ctx, ev.Path)
+			case watcher.KindDirDelete:
+				err = s.r.OnDirDelete(ctx, ev.Path)
 			}
 			if err != nil {
 				slog.Error("vault: reconcile event error",

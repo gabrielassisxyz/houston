@@ -33,7 +33,7 @@ func startInjectedAt(t *testing.T, root string, sched *fakeScheduler) (*Watcher,
 		t.Fatal(err)
 	}
 	raw := make(chan fsnotify.Event, 64)
-	w := newWithSources(root, Config{CoalesceWindow: time.Hour}, sched, raw, make(chan error, 1))
+	w := newWithSources(root, Config{CoalesceWindow: time.Hour}, sched, raw, make(chan error, 1), &fakeBackend{})
 	if err := w.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

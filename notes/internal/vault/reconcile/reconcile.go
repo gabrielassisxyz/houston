@@ -466,6 +466,58 @@ func (r *Reconciler) OnDelete(ctx context.Context, absPath string) error {
 	return nil
 }
 
+// OnDirDelete handles a directory removed or renamed away. No event names the
+// notes it held, so the path cache is asked: every note cached under the
+// directory whose file is gone is handed to OnDelete, which holds the delete
+// for the move window instead of tombstoning at once. A folder renamed inside
+// the vault therefore keeps each note's identity when its notes arrive at the
+// new path. A note still on disk under that path - the directory recreated
+// before this event was handled - is left alone.
+//
+// The prefix is compared exactly rather than with LIKE: a directory named
+// a_b must not take axb's notes with it, and LIKE also ignores case.
+func (r *Reconciler) OnDirDelete(ctx context.Context, absDir string) error {
+	prefix := r.relPath(absDir) + string(filepath.Separator)
+	var paths []string
+	err := r.g.DoRead(ctx, func(tx *graph.ReadTx) error {
+		rows, err := tx.Query(
+			`SELECT path FROM note_paths WHERE substr(path, 1, length(?)) = ? ORDER BY path`,
+			prefix, prefix,
+		)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var p string
+			if err := rows.Scan(&p); err != nil {
+				return err
+			}
+			paths = append(paths, p)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return fmt.Errorf("reconcile OnDirDelete %q: list cached paths: %w", absDir, err)
+	}
+
+	for _, rel := range paths {
+		abs := filepath.Join(r.vaultRoot, rel)
+		if _, statErr := os.Lstat(abs); statErr == nil {
+			continue
+		}
+		if err := r.OnDelete(ctx, abs); err != nil {
+			return fmt.Errorf("reconcile OnDirDelete %q: %w", absDir, err)
+		}
+	}
+	slog.Info("reconcile: directory gone",
+		"event", "dir_delete",
+		"path", absDir,
+		"notes", len(paths),
+	)
+	return nil
+}
+
 // FlushExpired tombstones all pending deletes whose age exceeds the window.
 // Tests call this directly after advancing the injected clock.
 // Returns the count of notes tombstoned and any error.

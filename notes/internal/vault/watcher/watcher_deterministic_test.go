@@ -70,13 +70,49 @@ func (s *fakeScheduler) scheduled() int {
 	return len(s.timers)
 }
 
+// fakeBackend records the OS watches the watcher asks for, in order, and
+// refuses nothing.
+type fakeBackend struct {
+	mu      sync.Mutex
+	added   []string
+	removed []string
+	closed  bool
+}
+
+func (b *fakeBackend) Add(name string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.added = append(b.added, name)
+	return nil
+}
+
+func (b *fakeBackend) Remove(name string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.removed = append(b.removed, name)
+	return nil
+}
+
+func (b *fakeBackend) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.closed = true
+	return nil
+}
+
+func (b *fakeBackend) snapshot() (added, removed []string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.added...), append([]string(nil), b.removed...)
+}
+
 // startInjected builds a watcher whose clock and raw events are the test's, and
 // returns the raw-event channel to feed it.
 func startInjected(t *testing.T, sched *fakeScheduler) (*Watcher, chan fsnotify.Event) {
 	t.Helper()
 	raw := make(chan fsnotify.Event, 64)
 	errs := make(chan error, 1)
-	w := newWithSources(t.TempDir(), Config{CoalesceWindow: time.Hour}, sched, raw, errs)
+	w := newWithSources(t.TempDir(), Config{CoalesceWindow: time.Hour}, sched, raw, errs, &fakeBackend{})
 	if err := w.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
