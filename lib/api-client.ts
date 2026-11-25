@@ -154,9 +154,25 @@ const base = (projectId: string) => `/api/p/${enc(projectId)}`;
 /** Signal-only stream: emits `change` whenever any project's tracker changes. */
 export const ALL_BEADS_STREAM_URL = "/api/all/beads/stream";
 
+export interface CapabilitiesResponse {
+  workDashboardUrl: string | null;
+}
+
+export type WorkProbeResponse =
+  | { configured: false }
+  | { configured: true; reachable: boolean; reason?: string };
+
 export const api = {
   allBeads: () => request<AllBeadsResponse>("/api/all/beads"),
   viewerMode: () => request<{ readOnly: boolean }>("/api/viewer-mode", { cache: "no-store" }),
+  capabilities: (signal?: AbortSignal) =>
+    request<CapabilitiesResponse>("/api/capabilities", { cache: "no-store", signal }),
+  workProbe: (signal?: AbortSignal) =>
+    request<WorkProbeResponse>("/api/work/probe", {
+      method: "POST",
+      cache: "no-store",
+      signal,
+    }),
   setViewerMode: (readOnly: boolean) => request<{ readOnly: boolean }>("/api/viewer-mode", {
     method: "PUT", body: JSON.stringify({ readOnly }),
   }),
