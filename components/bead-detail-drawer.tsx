@@ -289,6 +289,7 @@ function DrawerBody({
   const [previewEdit, setPreviewEdit] = React.useState(false);
   const [titleDraft, setTitleDraft] = React.useState(bead.title);
   const [descDraft, setDescDraft] = React.useState(bead.description ?? "");
+  const [refDraft, setRefDraft] = React.useState(bead.external_ref ?? "");
   const progress = checklistProgress(bead.description);
   const descRef = React.useRef<HTMLTextAreaElement>(null);
   const fileRef = React.useRef<HTMLInputElement>(null);
@@ -303,7 +304,10 @@ function DrawerBody({
   });
 
   const unsaved =
-    (editing && (titleDraft !== bead.title || descDraft !== (bead.description ?? ""))) ||
+    (editing &&
+      (titleDraft !== bead.title ||
+        descDraft !== (bead.description ?? "") ||
+        refDraft !== (bead.external_ref ?? ""))) ||
     [draft, closeDraft, gateReason].some((text) => text.trim() !== "");
   React.useEffect(() => {
     dirtyRef.current = unsaved;
@@ -316,6 +320,7 @@ function DrawerBody({
     if (readOnly) return;
     setTitleDraft(bead.title);
     setDescDraft(bead.description ?? "");
+    setRefDraft(bead.external_ref ?? "");
     setEditing(true);
   };
   const cancelEdit = () => setEditing(false);
@@ -323,8 +328,11 @@ function DrawerBody({
     if (readOnly) return;
     const t = titleDraft.trim();
     if (!t) return;
+    const ref = refDraft.trim();
+    // Sent only when changed, so editing the title never rewrites a value the CLI stored untrimmed.
+    const refPatch = ref === (bead.external_ref ?? "").trim() ? {} : { external_ref: ref };
     update.mutate(
-      { id: bead.id, patch: { title: t, description: descDraft } },
+      { id: bead.id, patch: { title: t, description: descDraft, ...refPatch } },
       { onSuccess: () => setEditing(false) },
     );
   };
@@ -394,6 +402,7 @@ function DrawerBody({
   const design = bead.design?.trim() ?? "";
   const acceptance = bead.acceptance_criteria?.trim() ?? "";
   const closeReason = closeReasonOf(bead);
+  const externalRef = bead.external_ref?.trim() ?? "";
   const comments = bead.comments ?? [];
   const links = reviewLinks(bead);
   const activity = [
@@ -577,6 +586,29 @@ function DrawerBody({
               </div>
             )}
           </div>
+          {/* The input takes the read row's place, so the label is never shown twice. */}
+          {editing && !readOnly ? (
+            <label className="col-span-2 flex flex-col gap-[5px]">
+              <span className={fieldLabel}>Referência externa</span>
+              <input
+                value={refDraft}
+                onChange={(e) => setRefDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (!isSubmitKey(e)) return;
+                  e.preventDefault();
+                  saveEdit();
+                }}
+                className="h-9 rounded-[9px] border border-border bg-[var(--surface-2)] px-[10px] font-mono text-[12.5px] text-[var(--text)] outline-none focus:border-[var(--brand)]"
+              />
+            </label>
+          ) : externalRef ? (
+            <div className="col-span-2 flex flex-col gap-[5px]">
+              <span className={fieldLabel}>Referência externa</span>
+              <div className="break-all rounded-[9px] border border-border bg-[var(--surface-2)] px-[10px] py-[8px] font-mono text-[12.5px] text-[var(--text-2)]">
+                {externalRef}
+              </div>
+            </div>
+          ) : null}
         </div>
 
         <LabelsField
