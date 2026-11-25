@@ -55,6 +55,9 @@ func (r *Reconciler) ColdStart(ctx context.Context) error {
 	// hashTakenBy maps content_hash → uuid for files that were already processed as creates.
 	// Used so a "new" file with the same hash as a disappeared UUID is treated as a move.
 	hashTakenBy := make(map[string]string)
+	// found collects every note path the walk reached, so the reports of paths
+	// that are gone can be dropped afterwards.
+	found := make(map[string]struct{})
 
 	walkErr := filepath.WalkDir(r.vaultRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -75,6 +78,8 @@ func (r *Reconciler) ColdStart(ctx context.Context) error {
 			return nil
 		}
 
+		found[r.relPath(path)] = struct{}{}
+
 		// A single malformed or conflicting file must never abort cold-start and
 		// take down the whole server - log it and keep walking.
 		if rerr := r.reconcileFile(ctx, path, byUUID, byHash, seenUUIDs, hashTakenBy); rerr != nil {
@@ -85,6 +90,7 @@ func (r *Reconciler) ColdStart(ctx context.Context) error {
 	if walkErr != nil {
 		return fmt.Errorf("coldstart: walk: %w", walkErr)
 	}
+	r.keepReportsOnly(found)
 
 	// --- Phase 3: tombstone disappeared entries ---
 	for _, e := range cached {
@@ -118,6 +124,9 @@ func (r *Reconciler) reconcileFile(
 	seenUUIDs map[string]struct{},
 	hashTakenBy map[string]string,
 ) error {
+	relPath := r.relPath(absPath)
+	r.clearReports(relPath)
+
 	raw, err := os.ReadFile(absPath)
 	if err != nil {
 		slog.Warn("coldstart: read file failed", "path", absPath, "error", err)
@@ -131,7 +140,6 @@ func (r *Reconciler) reconcileFile(
 	}
 
 	diskHash := HashBytes(raw)
-	relPath := r.relPath(absPath)
 
 	// --- Classify ---
 
@@ -155,11 +163,19 @@ func (r *Reconciler) reconcileFile(
 					return fmt.Errorf("OnChange %q: %w", absPath, err)
 				}
 
-			case !samePath:
+			case r.pathStillHolds(entry.path, fm.ID):
+				// Another path holds this note, whichever of the two the walk
+				// reached first: this file is a copy and stays out.
+				r.reportDuplicate(relPath, fm.ID, entry.path)
+
+			default:
 				// Path moved while off.
 				if err := r.applyMove(ctx, entry, absPath, relPath, diskHash, raw, sameHash); err != nil {
 					return fmt.Errorf("move uuid=%q: %w", fm.ID, err)
 				}
+				// The walk's snapshot follows the move, or a second copy later
+				// in the walk would find the old path gone and take the note.
+				byUUID[fm.ID] = cachedPathEntry{uuid: fm.ID, path: relPath, contentHash: diskHash}
 			}
 			return nil
 		}

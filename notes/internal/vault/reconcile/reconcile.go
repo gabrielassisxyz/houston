@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -259,6 +260,9 @@ type Reconciler struct {
 	pendingMu      sync.Mutex
 	pendingDeletes map[string]*pendingDelete // keyed by nodeID
 
+	reportsMu sync.Mutex
+	reports   map[string]map[ReportKind]FileReport // keyed by vault-relative path
+
 	// counters - updated atomically
 	eventsProcessed  atomic.Int64
 	notesCreated     atomic.Int64
@@ -280,6 +284,7 @@ func New(g *graph.Graph, vaultRoot string) *Reconciler {
 		window:         defaultDeleteWindow,
 		now:            time.Now,
 		pendingDeletes: make(map[string]*pendingDelete),
+		reports:        make(map[string]map[ReportKind]FileReport),
 	}
 }
 
@@ -314,6 +319,9 @@ func (r *Reconciler) Stats() Stats {
 // If the path is unknown (no cache entry), the call is a no-op.
 func (r *Reconciler) OnDelete(ctx context.Context, absPath string) error {
 	relPath := r.relPath(absPath)
+	// Before the lookup: a file the index left out has no row, and the
+	// early return below would keep its report alive after the file is gone.
+	r.clearReports(relPath)
 
 	// Resolve path → UUID + nodeID inside a read tx
 	var nodeUUID, nodeID, contentHash, nodeTitle string
@@ -447,6 +455,8 @@ func (r *Reconciler) OnCreate(ctx context.Context, absPath string) error {
 	if err != nil {
 		return fmt.Errorf("reconcile OnCreate %q: read file: %w", absPath, err)
 	}
+	relPath := r.relPath(absPath)
+	r.clearReports(relPath)
 
 	fm, raw, err := parseAndInject(absPath, raw)
 	if err != nil {
@@ -456,7 +466,6 @@ func (r *Reconciler) OnCreate(ctx context.Context, absPath string) error {
 	author := ResolveAuthor(fm.Author)
 	title := resolveTitle(fm, absPath)
 	body := extractBody(raw)
-	relPath := r.relPath(absPath)
 	contentHash := HashBytes(raw)
 	noteID := fm.ID
 
@@ -561,6 +570,15 @@ func (r *Reconciler) OnCreate(ctx context.Context, absPath string) error {
 		}
 
 		if isLive {
+			// A live note can be adopted by a path only when no other path
+			// still holds it: a second file with the same id is a sync
+			// client's conflict copy or a duplicated template, not the note.
+			if holder, dup, err := r.duplicateHolder(ctx, noteID, relPath); err != nil {
+				return fmt.Errorf("reconcile OnCreate %q: %w", absPath, err)
+			} else if dup {
+				r.reportDuplicate(relPath, noteID, holder)
+				return nil
+			}
 			if err := r.adoptNote(ctx, absPath, relPath, contentHash, noteID, title, body, fm, author); err != nil {
 				return err
 			}
@@ -725,6 +743,8 @@ func (r *Reconciler) OnChange(ctx context.Context, absPath string) error {
 	if err != nil {
 		return fmt.Errorf("reconcile OnChange %q: read file: %w", absPath, err)
 	}
+	relPath := r.relPath(absPath)
+	r.clearReports(relPath)
 
 	fm, raw, err := parseAndInject(absPath, raw)
 	if err != nil {
@@ -736,10 +756,20 @@ func (r *Reconciler) OnChange(ctx context.Context, absPath string) error {
 		return r.OnCreate(ctx, absPath)
 	}
 
+	// The watcher reports a new file as a change, never as a create, so this
+	// is where a live copy of a note arrives. Updating the node from it would
+	// point the note at the copy; a different path is a move only when the
+	// note's own path no longer holds it.
+	if holder, dup, err := r.duplicateHolder(ctx, fm.ID, relPath); err != nil {
+		return fmt.Errorf("reconcile OnChange %q: %w", absPath, err)
+	} else if dup {
+		r.reportDuplicate(relPath, fm.ID, holder)
+		return nil
+	}
+
 	author := ResolveAuthor(fm.Author)
 	title := resolveTitle(fm, absPath)
 	body := extractBody(raw)
-	relPath := r.relPath(absPath)
 	contentHash := HashBytes(raw)
 
 	err = r.g.DoWrite(ctx, func(tx *graph.WriteTx) error {
@@ -778,6 +808,52 @@ func (r *Reconciler) OnChange(ctx context.Context, absPath string) error {
 }
 
 // --- helpers ---
+
+// duplicateHolder reports whether the note id is bound to a path other than
+// relPath that still holds it, and returns that path. The file at relPath is
+// then a second copy of the note and stays out of the index.
+func (r *Reconciler) duplicateHolder(ctx context.Context, id, relPath string) (string, bool, error) {
+	cached, found, err := LookupByUUID(ctx, r.g, id)
+	if err != nil {
+		return "", false, err
+	}
+	if !found || cached == relPath {
+		return "", false, nil
+	}
+	return cached, r.pathStillHolds(cached, id), nil
+}
+
+// pathStillHolds reports whether the file at the vault-relative path cached
+// for id is still that note's file. It is while it exists, unless it now names
+// another id: a sync client's empty placeholder, an unreadable file or one
+// that does not parse is still the note's, and reading it as gone would let a
+// copy take the note. A file that names a different id has been replaced, and
+// the note has moved wherever its id now is.
+func (r *Reconciler) pathStillHolds(relPath, id string) bool {
+	raw, err := os.ReadFile(filepath.Join(r.vaultRoot, relPath))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	fm, err := frontmatter.Parse(raw)
+	if err != nil || fm.ID == "" {
+		return true
+	}
+	return fm.ID == id
+}
+
+// reportDuplicate records that relPath was left out because holder keeps id.
+func (r *Reconciler) reportDuplicate(relPath, id, holder string) {
+	r.report(relPath, ReportDuplicateID, fmt.Sprintf("id %s is held by %s", id, holder))
+	slog.Warn("reconcile: duplicate id; file left out of the index",
+		"path", relPath,
+		"node_id", id,
+		"held_by", holder,
+		"decision", "duplicate",
+	)
+}
 
 // parseAndInject reads frontmatter and injects a UUID if absent.
 // It writes the updated bytes back to disk only when injection was needed.
