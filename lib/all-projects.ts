@@ -49,20 +49,57 @@ function withLimit<T>(work: Promise<T>, limitMs: number): Promise<T> {
   return Promise.race([work, expired]).finally(() => clearTimeout(timer));
 }
 
-type Outcome =
-  | { project: ProjectRef; read: ProjectRead }
-  | { project: ProjectRef; error: string };
+/** One project's beads with the entry they were read with, local ids intact. */
+export interface ProjectReadSuccess<T extends ProjectRef> {
+  project: T;
+  kind: TrackerKind;
+  beads: Bead[];
+}
 
-async function readOne(
-  project: ProjectRef,
+/** The per-project outcome of a bounded parallel read, before any namespacing. */
+export interface ProjectsRead<T extends ProjectRef> {
+  reads: ProjectReadSuccess<T>[];
+  failed: FailedProject[];
+}
+
+type Outcome<T extends ProjectRef> =
+  | { project: T; read: ProjectRead }
+  | { project: T; error: string };
+
+async function readOne<T extends ProjectRef>(
+  project: T,
   read: ProjectReader,
   limitMs: number,
-): Promise<Outcome> {
+): Promise<Outcome<T>> {
   try {
     return { project, read: await withLimit(read(project), limitMs) };
   } catch (err) {
     return { project, error: failureText(err) };
   }
+}
+
+/**
+ * Reads every project at once. A project that throws or runs past `limitMs`
+ * is reported in `failed` and the others are still returned. The entries keep
+ * the caller's type and the beads keep their local ids; `readAllProjects`
+ * namespaces them for the merged answer.
+ */
+export async function readProjects<T extends ProjectRef>(
+  projects: T[],
+  read: ProjectReader = readProjectFromStore,
+  limitMs: number = PROJECT_READ_LIMIT_MS,
+): Promise<ProjectsRead<T>> {
+  const outcomes = await Promise.all(projects.map((p) => readOne(p, read, limitMs)));
+  const result: ProjectsRead<T> = { reads: [], failed: [] };
+  for (const outcome of outcomes) {
+    if ("error" in outcome) {
+      const { id, name } = outcome.project;
+      result.failed.push({ id, name, error: outcome.error });
+      continue;
+    }
+    result.reads.push({ project: outcome.project, kind: outcome.read.kind, beads: outcome.read.beads });
+  }
+  return result;
 }
 
 /**
@@ -74,15 +111,10 @@ export async function readAllProjects(
   read: ProjectReader = readProjectFromStore,
   limitMs: number = PROJECT_READ_LIMIT_MS,
 ): Promise<AllProjectsRead> {
-  const outcomes = await Promise.all(projects.map((p) => readOne(p, read, limitMs)));
-  const result: AllProjectsRead = { beads: [], projects: [], failed: [] };
-  for (const outcome of outcomes) {
-    const { id, name } = outcome.project;
-    if ("error" in outcome) {
-      result.failed.push({ id, name, error: outcome.error });
-      continue;
-    }
-    const { kind, beads } = outcome.read;
+  const { reads, failed } = await readProjects(projects, read, limitMs);
+  const result: AllProjectsRead = { beads: [], projects: [], failed };
+  for (const { project, kind, beads } of reads) {
+    const { id, name } = project;
     result.projects.push({ id, name, kind, count: beads.length });
     for (const bead of beads) result.beads.push(namespaceBead({ id, name }, bead));
   }
