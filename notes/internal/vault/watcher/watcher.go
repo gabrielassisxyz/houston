@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+
+	"github.com/gabrielassisxyz/houston/notes/internal/vault/vaultfile"
 )
 
 // EventKind represents the type of a filesystem change event.
@@ -267,16 +269,28 @@ func (w *Watcher) loop(ctx context.Context) {
 }
 
 func (w *Watcher) handleEvent(event fsnotify.Event) {
-	path := event.Name
+	path := filepath.Clean(event.Name)
 
-	// Only care about .md files and directories (for recursive watch extension).
+	// Dot-files and dot-directories are judged by the path below the root,
+	// never by the directories above it, so a vault under a dot-named
+	// directory is watched; a path outside the root is refused as such.
+	rel, err := vaultfile.VaultRel(w.root, path)
+	if err != nil {
+		slog.Debug("watcher: event outside the vault root ignored", "path", path)
+		return
+	}
+	if vaultfile.IsHiddenRel(rel) {
+		return
+	}
+
+	// Only care about notes and directories (for recursive watch extension).
 	isDir := false
 	if info, err := os.Stat(path); err == nil && info.IsDir() {
 		isDir = true
 	}
 
 	if !isDir {
-		if filepath.Ext(path) != ".md" {
+		if !vaultfile.IsNoteFile(path) {
 			return
 		}
 	}

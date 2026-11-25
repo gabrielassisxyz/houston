@@ -12,6 +12,7 @@ import (
 	"github.com/gabrielassisxyz/houston/notes/internal/graph"
 	"github.com/gabrielassisxyz/houston/notes/internal/graph/nodes"
 	"github.com/gabrielassisxyz/houston/notes/internal/vault/frontmatter"
+	"github.com/gabrielassisxyz/houston/notes/internal/vault/vaultfile"
 )
 
 // ColdStart reconciles the vault on startup against the path cache and graph.
@@ -77,7 +78,7 @@ func (r *Reconciler) ColdStart(ctx context.Context) error {
 		if d.IsDir() {
 			return nil
 		}
-		if filepath.Ext(path) != ".md" {
+		if !vaultfile.IsNoteFile(path) {
 			return nil
 		}
 

@@ -7,6 +7,8 @@ import (
 	"path"
 	"regexp"
 	"strings"
+
+	"github.com/gabrielassisxyz/houston/notes/internal/vault/vaultfile"
 )
 
 // nonNoteExts are file extensions treated as attachments rather than notes,
@@ -81,7 +83,7 @@ func NormalizeTarget(raw string) string {
 	}
 	s = strings.ReplaceAll(s, "\\", "/")
 	s = strings.ToLower(s)
-	s = strings.TrimSuffix(s, ".md")
+	s = vaultfile.TrimNoteExt(s)
 	return s
 }
 

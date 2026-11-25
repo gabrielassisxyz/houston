@@ -1274,7 +1274,19 @@ func locateNoteFile(ctx context.Context, g *graph.Graph, vaultRoot, noteID strin
 
 	var match string
 	_ = filepath.WalkDir(vaultRoot, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
+		if walkErr != nil {
+			return nil
+		}
+		// A copy in .trash or another dot-directory is not the note's file;
+		// judged below the root only, so a vault under a dot-named directory
+		// is still searched.
+		if rel, relErr := vaultfile.VaultRel(vaultRoot, path); relErr != nil || vaultfile.IsHiddenRel(rel) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() || !vaultfile.IsNoteFile(path) {
 			return nil
 		}
 		raw, readErr := os.ReadFile(path)

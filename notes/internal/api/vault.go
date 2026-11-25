@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -82,20 +83,25 @@ func registerVaultRoutes(mux *http.ServeMux, d Deps) {
 		root := d.VaultRoot
 
 		var files []string
-		_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return nil
 			}
+			rel, relErr := vaultfile.VaultRel(root, path)
+			if relErr != nil {
+				return nil
+			}
 			// The walk reads the disk, not the index, so it would bring back
-			// every note a delete moved into the vault trash.
-			if info.IsDir() {
-				if rel, relErr := filepath.Rel(root, path); relErr == nil && inVaultTrash(rel) {
+			// .obsidian, a sync client's dot-folders and every note a delete
+			// moved into the vault trash. Judged below the root only, so a
+			// vault kept under a dot-named directory is still listed.
+			if vaultfile.IsHiddenRel(rel) {
+				if d.IsDir() {
 					return filepath.SkipDir
 				}
 				return nil
 			}
-			if strings.HasSuffix(info.Name(), ".md") {
-				rel, _ := filepath.Rel(root, path)
+			if !d.IsDir() && vaultfile.IsNoteFile(path) {
 				files = append(files, rel)
 			}
 			return nil
@@ -205,7 +211,7 @@ func registerVaultRoutes(mux *http.ServeMux, d Deps) {
 			vaultFileWriteError(w, http.StatusBadRequest, filePath+": the body is empty, and an empty file is never indexed")
 			return
 		}
-		if strings.HasSuffix(fullPath, ".md") && !utf8.Valid(body) {
+		if vaultfile.IsNoteFile(fullPath) && !utf8.Valid(body) {
 			vaultFileWriteError(w, http.StatusBadRequest, filePath+": the body is not valid UTF-8, and such a note is never indexed")
 			return
 		}
@@ -223,7 +229,7 @@ func registerVaultRoutes(mux *http.ServeMux, d Deps) {
 		// body survived; the revisions and every edge pointing at the old id did not.
 		// A path with no row is genuinely new and gets a new id, which is the case the
 		// injection was written for.
-		if strings.HasSuffix(fullPath, ".md") {
+		if vaultfile.IsNoteFile(fullPath) {
 			relPath, relErr := filepath.Rel(root, fullPath)
 			if relErr != nil {
 				vaultFileWriteError(w, http.StatusInternalServerError, relErr.Error())
@@ -275,7 +281,7 @@ func registerVaultRoutes(mux *http.ServeMux, d Deps) {
 		// would answer "saved", the file would sit on disk, and the graph would
 		// quietly never adopt it - the orphan shape the shared write primitive
 		// exists to prevent. Same resolver, so there is one definition of the rule.
-		if strings.HasSuffix(fullPath, ".md") {
+		if vaultfile.IsNoteFile(fullPath) {
 			if fm, fmErr := frontmatter.Parse(body); fmErr == nil {
 				if _, permErr := reconcile.ResolvePermission(fm.Permission, fm.Author); permErr != nil {
 					vaultFileWriteError(w, http.StatusBadRequest, permErr.Error())
