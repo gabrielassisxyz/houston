@@ -107,6 +107,8 @@ async function open(url, { beads = projectBeads(), readOnly = false, viewport = 
       };
       return route.fulfill({ json: { beads: state.beads.map(merged), meta } });
     }
+    // The sidebar reads which optional features exist; none is configured here.
+    if (path === '/api/capabilities') return route.fulfill({ json: { workDashboardUrl: null, chain: false } });
     if (path.endsWith('/order')) return route.fulfill({ json: { orders: {} } });
     if (path === '/api/p/demo/activity') return route.fulfill({ json: { items: [] } });
     const single = state.beads.find((b) => path === `/api/p/demo/beads/${b.id}`);
