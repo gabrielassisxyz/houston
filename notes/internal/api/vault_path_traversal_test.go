@@ -142,3 +142,35 @@ func TestVaultPostFileAllowsNestedPath(t *testing.T) {
 		t.Fatalf("nested note was not written: %v", err)
 	}
 }
+
+func TestVaultDeleteFileRejectsTraversal(t *testing.T) {
+	root, outside, outsideBody := traversalVault(t)
+	mux := newTestRouter(t, newTestDeps(t, root))
+
+	paths := traversalPaths(outside)
+	// The vault root itself is not a deletable target either.
+	paths["vault root"] = "."
+
+	for name, p := range paths {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest("DELETE", "/api/vault/file?path="+p, nil)
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+			}
+			assertNoPathLeak(t, w.Body.String(), root)
+			got, err := os.ReadFile(outside)
+			if err != nil {
+				t.Fatalf("file outside the vault must still exist: %v", err)
+			}
+			if string(got) != outsideBody {
+				t.Fatalf("file outside the vault was modified: %q", string(got))
+			}
+			if _, err := os.Stat(root); err != nil {
+				t.Fatalf("the vault root must survive: %v", err)
+			}
+		})
+	}
+}

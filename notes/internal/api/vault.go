@@ -84,7 +84,15 @@ func registerVaultRoutes(mux *http.ServeMux, d Deps) {
 			if err != nil {
 				return nil
 			}
-			if !info.IsDir() && strings.HasSuffix(info.Name(), ".md") {
+			// The walk reads the disk, not the index, so it would bring back
+			// every note a delete moved into the vault trash.
+			if info.IsDir() {
+				if rel, relErr := filepath.Rel(root, path); relErr == nil && inVaultTrash(rel) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if strings.HasSuffix(info.Name(), ".md") {
 				rel, _ := filepath.Rel(root, path)
 				files = append(files, rel)
 			}
@@ -372,6 +380,46 @@ func registerVaultRoutes(mux *http.ServeMux, d Deps) {
 			"position": position,
 			"bytes":    len(block),
 		})
+	})
+
+	// Moving the file out is enough: the vault watcher's OnDelete reconciles the
+	// graph node away, the same path an external (file-explorer) delete takes.
+	// The note goes to the vault's own .trash folder rather than the system
+	// trash; see moveToVaultTrash for why.
+	mux.HandleFunc("DELETE /api/vault/file", func(w http.ResponseWriter, r *http.Request) {
+		root := d.VaultRoot
+
+		filePath := r.URL.Query().Get("path")
+		if filePath == "" {
+			http.Error(w, "missing path", http.StatusBadRequest)
+			return
+		}
+
+		// Destructive op: refuse anything that escapes the vault root.
+		fullPath, err := resolveVaultFilePath(root, filePath)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// resolveVaultFilePath treats the root itself as contained; deleting it
+		// would trash the whole vault, so only paths *below* it are targets.
+		if absRoot, absErr := filepath.Abs(root); absErr != nil || fullPath == absRoot {
+			http.Error(w, "path must stay within the vault", http.StatusBadRequest)
+			return
+		}
+
+		if _, err := moveToVaultTrash(root, fullPath); err != nil {
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+				http.Error(w, "no such note: "+filePath, http.StatusNotFound)
+			case errors.Is(err, ErrInvalidDeleteTarget):
+				http.Error(w, err.Error(), http.StatusBadRequest)
+			default:
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 }
 

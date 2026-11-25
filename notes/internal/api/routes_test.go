@@ -97,6 +97,7 @@ func TestRegisterServesEveryPortedRouteAndNoOther(t *testing.T) {
 		{"GET", "/api/vault/notes", "GET /api/vault/notes"},
 		{"GET", "/api/vault/file", "GET /api/vault/file"},
 		{"POST", "/api/vault/file", "POST /api/vault/file"},
+		{"DELETE", "/api/vault/file", "DELETE /api/vault/file"},
 		{"POST", "/api/vault/append", "POST /api/vault/append"},
 		{"GET", "/api/notes", "GET /api/notes"},
 		{"GET", "/api/notes/tags", "GET /api/notes/tags"},
