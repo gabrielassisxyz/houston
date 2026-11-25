@@ -1,0 +1,256 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-11-20T12:01:00+00:00",
+  "comparison": { "added": ["INC00000001"], "removed": [] },
+  "morning": { "summary": "Synthetic summary, ignored by the reader." },
+  "sources": {
+    "incidents": {
+      "label": "Incidents",
+      "provider": "servicenow",
+      "status": "ok",
+      "complete": true,
+      "last_attempt_at": "2026-11-20T12:00:00+00:00",
+      "last_success_at": "2026-11-20T12:00:30+00:00",
+      "error": null,
+      "source_url": "https://example.com/incident_list.do?sysparm_query=scope-a",
+      "records": [
+        {
+          "id": "00000000000000000000000000000001",
+          "key": "00000000000000000000000000000001",
+          "number": "INC00000001",
+          "title": "Synthetic incident",
+          "state": "Example state",
+          "state_value": "2",
+          "priority": "2 - Example priority",
+          "link": "https://example.com/incident.do?sys_id=00000000000000000000000000000001"
+        }
+      ]
+    },
+    "approvals": {
+      "label": "Approvals",
+      "provider": "servicenow",
+      "status": "error",
+      "complete": false,
+      "last_attempt_at": "2026-11-20T12:00:00+00:00",
+      "last_success_at": "2026-11-19T12:00:30.123456+00:00",
+      "error": "Source consultation failed.",
+      "records": [
+        {
+          "id": "00000000000000000000000000000011",
+          "key": "00000000000000000000000000000011",
+          "number": "CHG00000001",
+          "title": "Synthetic change",
+          "state": "Requested",
+          "reference": "CHG00000001",
+          "record_type": "change_request",
+          "link": "https://example.com/sysapproval_approver.do?sys_id=00000000000000000000000000000011"
+        },
+        {
+          "id": "00000000000000000000000000000012",
+          "key": "00000000000000000000000000000012",
+          "number": "CHG00000002",
+          "title": "Synthetic change outside the collected scope",
+          "state": "Requested",
+          "reference": "CHG00000002",
+          "record_type": "change_request",
+          "link": "https://example.com/sysapproval_approver.do?sys_id=00000000000000000000000000000012"
+        },
+        {
+          "id": "00000000000000000000000000000013",
+          "key": "00000000000000000000000000000013",
+          "number": "",
+          "title": "",
+          "state": "Requested",
+          "reference": "",
+          "record_type": "",
+          "link": "https://example.com/sysapproval_approver.do?sys_id=00000000000000000000000000000013"
+        }
+      ]
+    },
+    "changes": {
+      "label": "Changes",
+      "provider": "servicenow",
+      "status": "ok",
+      "complete": true,
+      "last_attempt_at": "2026-11-20T12:00:00+00:00",
+      "last_success_at": "2026-11-20T12:00:30+00:00",
+      "error": null,
+      "records": [
+        {
+          "id": "00000000000000000000000000000021",
+          "key": "00000000000000000000000000000021",
+          "number": "CHG00000001",
+          "title": "Synthetic change",
+          "state": "Scheduled",
+          "scheduled_start": "01/12/2026 09:00:00",
+          "link": "https://example.com/change_request.do?sys_id=00000000000000000000000000000021"
+        }
+      ]
+    },
+    "work_tracker_stories": {
+      "label": "Stories",
+      "provider": "servicenow",
+      "status": "ok",
+      "complete": true,
+      "last_attempt_at": "2026-11-20T12:00:00+00:00",
+      "last_success_at": "2026-11-20T12:00:30+00:00",
+      "error": null,
+      "records": [
+        {
+          "id": "00000000000000000000000000000031",
+          "key": "00000000000000000000000000000031",
+          "number": "STRY00000001",
+          "title": "Synthetic story",
+          "state": "Work in progress",
+          "sprint": "sprint-a",
+          "sprint_id": "00000000000000000000000000000039",
+          "link": "https://example.com/rm_story.do?sys_id=00000000000000000000000000000031"
+        }
+      ]
+    },
+    "work_tracker_bugs": {
+      "label": "Bugs",
+      "provider": "servicenow",
+      "status": "ok",
+      "complete": true,
+      "last_attempt_at": "2026-11-20T12:00:00+00:00",
+      "last_success_at": "2026-11-20T12:00:30+00:00",
+      "error": null,
+      "records": [
+        {
+          "id": "00000000000000000000000000000041",
+          "key": "00000000000000000000000000000041",
+          "number": "BUG00000001",
+          "title": "Synthetic bug",
+          "state": "Open",
+          "sprint": "",
+          "link": "https://example.com/rm_defect.do?sys_id=00000000000000000000000000000041"
+        }
+      ]
+    },
+    "work_tracker_tasks": {
+      "label": "Tasks",
+      "provider": "servicenow",
+      "status": "ok",
+      "complete": true,
+      "last_attempt_at": "2026-11-20T12:00:00+00:00",
+      "last_success_at": "2026-11-20T12:00:30+00:00",
+      "error": null,
+      "records": [
+        {
+          "id": "00000000000000000000000000000051",
+          "key": "00000000000000000000000000000051",
+          "number": "",
+          "title": "Synthetic task without a number",
+          "state": "Open",
+          "sprint": "sprint-a",
+          "link": "https://example.com/rm_task.do?sys_id=00000000000000000000000000000051"
+        }
+      ]
+    },
+    "work_tracker_subtasks": {
+      "label": "Subtasks",
+      "provider": "servicenow",
+      "status": "ok",
+      "complete": true,
+      "last_attempt_at": "2026-11-20T12:00:00+00:00",
+      "last_success_at": "2026-11-20T12:00:30+00:00",
+      "error": null,
+      "records": []
+    },
+    "ritms": {
+      "label": "Request items",
+      "provider": "servicenow",
+      "status": "ok",
+      "complete": true,
+      "last_attempt_at": "2026-11-20T12:00:00+00:00",
+      "last_success_at": "2026-11-20T12:00:30+00:00",
+      "error": null,
+      "records": [
+        {
+          "id": "00000000000000000000000000000061",
+          "key": "00000000000000000000000000000061",
+          "number": "RITM00000001",
+          "title": "Example catalog item",
+          "state": "Open",
+          "link": "https://example.com/sc_req_item.do?sys_id=00000000000000000000000000000061"
+        }
+      ]
+    },
+    "pipeline": {
+      "label": "Pipeline",
+      "provider": "pipeline",
+      "status": "partial",
+      "complete": false,
+      "last_attempt_at": "2026-11-20T12:00:00Z",
+      "last_success_at": null,
+      "error": "Incomplete collection.",
+      "records": [
+        {
+          "key": "run:org/repo-a:101",
+          "kind": "run",
+          "repo": "org/repo-a",
+          "id": 101,
+          "created_at": "2026-11-20T11:00:00Z",
+          "head": "release/example-a",
+          "status": "waiting",
+          "conclusion": null,
+          "stage": "abre_pr",
+          "changes": ["CHG00000001"],
+          "existing_prs": [201]
+        },
+        {
+          "key": "run:org/repo-b:102",
+          "kind": "run",
+          "repo": "org/repo-b",
+          "id": 102,
+          "created_at": "2026-11-20T10:00:00Z",
+          "head": null,
+          "status": "completed",
+          "conclusion": "success",
+          "stage": "prod"
+        },
+        {
+          "key": "pr:org/repo-a:201",
+          "kind": "pr",
+          "repo": "org/repo-a",
+          "number": 201,
+          "base": "main",
+          "head": "release/example-a",
+          "author": "human",
+          "created_at": "2026-11-20T09:00:00Z",
+          "anomalies": ["stale_release"]
+        },
+        {
+          "key": "issue:org/repo-b:pulls",
+          "kind": "issue",
+          "repo": "org/repo-b",
+          "part": "pulls",
+          "run_id": null,
+          "status": "error",
+          "error": "The read command did not finish."
+        },
+        {
+          "key": "issue:org/repo-a:annotations:101",
+          "kind": "issue",
+          "repo": "org/repo-a",
+          "part": "annotations",
+          "run_id": 101,
+          "status": "error",
+          "error": "The read command did not finish."
+        },
+        {
+          "key": "issue:budget",
+          "kind": "issue",
+          "part": "budget",
+          "limit": 120
+        }
+      ]
+    },
+    "observability_logs": {
+      "label": 7,
+      "status": "unknown",
+      "records": "not a list"
+    }
+  }
+}

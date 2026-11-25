@@ -89,7 +89,7 @@ func createNode(ctx context.Context, tx *graph.WriteTx, nodeType string, spec No
 		return "", fmt.Errorf("createNode: insert node: %w", err)
 	}
 
-	if err := finishNodeCreate(ctx, tx, meta.ID, attrs, fts, spec.NodeTags(), author); err != nil {
+	if err := finishNodeCreate(ctx, tx, meta.ID, attrs, fts, spec.NodeTags(), nodeRefs(spec), author); err != nil {
 		return "", err
 	}
 	return meta.ID, nil
@@ -147,16 +147,16 @@ func createNodeIfAbsent(ctx context.Context, tx *graph.WriteTx, nodeType string,
 		return meta.ID, false, nil
 	}
 
-	if err := finishNodeCreate(ctx, tx, meta.ID, attrs, fts, spec.NodeTags(), author); err != nil {
+	if err := finishNodeCreate(ctx, tx, meta.ID, attrs, fts, spec.NodeTags(), nodeRefs(spec), author); err != nil {
 		return "", false, err
 	}
 	return meta.ID, true, nil
 }
 
-// finishNodeCreate writes the FTS index, tags, and initial revision for a
-// node whose row in the nodes table was just inserted by createNode or
+// finishNodeCreate writes the FTS index, tags, refs and initial revision for
+// a node whose row in the nodes table was just inserted by createNode or
 // createNodeIfAbsent.
-func finishNodeCreate(ctx context.Context, tx *graph.WriteTx, id string, attrs []byte, fts FTSFields, rawTags []string, author Author) error {
+func finishNodeCreate(ctx context.Context, tx *graph.WriteTx, id string, attrs []byte, fts FTSFields, rawTags []string, rawRefs []string, author Author) error {
 	// Build FTS attrs content: body + tags (space-separated)
 	ftsAttrs := fts.Body
 	if fts.Tags != "" {
@@ -206,6 +206,17 @@ func finishNodeCreate(ctx context.Context, tx *graph.WriteTx, id string, attrs [
 		}
 	}
 
+	// Insert refs (de-duplicated by case-folded text: under COLLATE NOCASE
+	// [hou-4kz, HOU-4KZ] would otherwise fail the primary key).
+	for _, ref := range dedupRefs(rawRefs) {
+		if _, err := tx.Exec(
+			`INSERT INTO note_refs(node_id, ref) VALUES (?, ?)`,
+			id, ref,
+		); err != nil {
+			return fmt.Errorf("finishNodeCreate: insert note_refs: %w", err)
+		}
+	}
+
 	// Build and insert first revision (diff = full snapshot)
 	revisionID := ids.New()
 	snapshotB, err := snapshotJSON(fts.Title, string(attrs), tags)
@@ -224,7 +235,7 @@ func finishNodeCreate(ctx context.Context, tx *graph.WriteTx, id string, attrs [
 	return nil
 }
 
-// updateNode updates an existing node's title, attrs, FTS index, tags, and stores a revision.
+// updateNode updates an existing node's title, attrs, FTS index, tags, refs and stores a revision.
 func updateNode(ctx context.Context, tx *graph.WriteTx, spec NodeSpec, author Author) error {
 	if !author.Valid() {
 		return graph.ErrAuthorRequired
@@ -254,6 +265,12 @@ func updateNode(ctx context.Context, tx *graph.WriteTx, spec NodeSpec, author Au
 
 	// Read current tags
 	prevTags, err := selectTags(ctx, tx, meta.ID)
+	if err != nil {
+		return err
+	}
+
+	// Read current refs (live join: deleted notes are never returned through it)
+	prevRefs, err := selectRefsForNode(tx, meta.ID)
 	if err != nil {
 		return err
 	}
@@ -331,6 +348,25 @@ func updateNode(ctx context.Context, tx *graph.WriteTx, spec NodeSpec, author Au
 		)
 		if err != nil {
 			return fmt.Errorf("updateNode: insert node_tags: %w", err)
+		}
+	}
+
+	// Reconcile refs by case-folded text (a case-only edit is no change)
+	toAddRefs, toRemoveRefs := diffRefs(prevRefs, nodeRefs(spec))
+	for _, ref := range toRemoveRefs {
+		if _, err := tx.Exec(
+			`DELETE FROM note_refs WHERE node_id = ? AND ref = ? COLLATE NOCASE`,
+			meta.ID, ref,
+		); err != nil {
+			return fmt.Errorf("updateNode: delete note_refs: %w", err)
+		}
+	}
+	for _, ref := range toAddRefs {
+		if _, err := tx.Exec(
+			`INSERT INTO note_refs(node_id, ref) VALUES (?, ?)`,
+			meta.ID, ref,
+		); err != nil {
+			return fmt.Errorf("updateNode: insert note_refs: %w", err)
 		}
 	}
 
