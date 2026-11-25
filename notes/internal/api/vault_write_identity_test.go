@@ -119,7 +119,7 @@ func TestVaultWriteDoesNotResurrectATombstonedID(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return nodes.SoftDeleteNoteTx(ctx, tx, deadID, "deleted-then-rewritten", "Gone",
+		return nodes.SoftDeleteNoteTx(ctx, tx, deadID, path, "Gone",
 			nodes.Author{Name: "test"})
 	}); err != nil {
 		t.Fatalf("seed tombstone: %v", err)
