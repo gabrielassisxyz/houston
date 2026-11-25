@@ -28,6 +28,8 @@ const refused = [
   ["password only", "http://:pw@127.0.0.1/"],
   ["ftp protocol", "ftp://127.0.0.1/"],
   ["javascript protocol", "javascript:alert(1)"],
+  ["websocket protocol on the loopback host", "ws://127.0.0.1:8000/"],
+  ["file protocol on the loopback host", "file://127.0.0.1/etc/hosts"],
   ["localhost", "http://localhost:8000/"],
   ["127.0.0.2", "http://127.0.0.2/"],
   ["ipv6 loopback", "http://[::1]/"],
