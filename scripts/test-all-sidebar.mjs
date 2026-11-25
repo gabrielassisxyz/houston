@@ -40,19 +40,28 @@ let page;
 // Named in the failure report: a wait that times out says only TimeoutError.
 let step = "start";
 
-async function openScenario(url, { width = 1500, readOnly = false, storedWidth } = {}) {
+async function openScenario(url, { width = 1500, readOnly = false, storedWidth, configured = false } = {}) {
   const context = await browser.newContext({ viewport: { width, height: 1000 } });
   if (storedWidth) {
     await context.addInitScript((value) => window.localStorage.setItem("bmus.width.sidebar", value), String(storedWidth));
   }
   page = await context.newPage();
   page.setDefaultTimeout(10_000);
-  const state = { requests: [], viewerAnswers: 0 };
+  const state = { requests: [], viewerAnswers: 0, capsAnswers: 0 };
+  const workUrl = "http://127.0.0.1:9/painel-do-trabalho";
   await page.route("**/api/**", (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     state.requests.push({ method: request.method(), path, from: new URL(page.url()).pathname });
+    if (path === "/api/work/probe") {
+      if (configured) return route.fulfill({ json: { configured: true, reachable: false } });
+      return route.fulfill({ status: 500, json: { error: `unexpected ${request.method()} ${path}` } });
+    }
     if (request.method() !== "GET") return route.fulfill({ status: 500, json: { error: `unexpected ${request.method()} ${path}` } });
+    if (path === "/api/capabilities") {
+      state.capsAnswers += 1;
+      return route.fulfill({ json: { workDashboardUrl: configured ? workUrl : null } });
+    }
     if (path === "/api/viewer-mode") {
       state.viewerAnswers += 1;
       return route.fulfill({ json: { readOnly } });
@@ -244,6 +253,52 @@ try {
   await openSwitcher();
   await page.keyboard.press("Escape");
   checkRequests(scenario.state, "read-only");
+  await scenario.context.close();
+
+  step = "configured destinations group";
+  scenario = await openScenario("/all", { configured: true });
+  await card("alpha:a-1").waitFor();
+  const trabalho = page.getByRole("link", { name: "Trabalho", exact: true });
+  await trabalho.waitFor();
+  assert.equal(await page.locator("nav").getByRole("link", { name: "Trabalho", exact: true }).count(), 1, "the Trabalho link sits inside the navigation landmark");
+  const viewsGroup = page.locator('nav [data-nav-group="views"]');
+  const destGroup = page.locator('nav [data-nav-group="destinations"]');
+  assert.equal(await viewsGroup.count(), 1, "one views group");
+  assert.equal(await destGroup.count(), 1, "one destinations group");
+  assert.deepEqual(
+    (await viewsGroup.getByRole("button").allInnerTexts()).map((text) => text.replace(/\s+/g, " ").trim()),
+    ["Board", "List", "Epics 2"],
+    "the view buttons stay one group in their existing order",
+  );
+  const groupOrder = await page.locator("nav [data-nav-group]").evaluateAll((els) => els.map((el) => el.getAttribute("data-nav-group")));
+  assert.deepEqual(groupOrder, ["views", "destinations"], "the destinations group follows the views group");
+  assert.equal(await destGroup.getByRole("link").count(), 1, "Trabalho is the only item of the destinations group");
+  assert.equal((await destGroup.getByRole("link", { name: "Trabalho", exact: true }).innerText()).trim(), "Trabalho", "the destinations item reads Trabalho");
+  assert.equal(await trabalho.getAttribute("aria-current"), null, "no aria-current on /all");
+  await trabalho.click();
+  await page.waitForURL((url) => url.pathname === "/work");
+  assert.equal(await page.getByRole("link", { name: "Trabalho", exact: true }).getAttribute("aria-current"), "page", "aria-current on /work");
+  await scenario.context.close();
+
+  step = "configured mobile sheet closes";
+  scenario = await openScenario("/all", { width: 390, configured: true });
+  await card("alpha:a-1").waitFor();
+  await page.getByRole("button", { name: "Open navigation and project menu" }).click();
+  const sheet2 = page.getByRole("dialog");
+  await sheet2.getByRole("button", { name: SWITCHER, exact: true }).waitFor();
+  const sheetTrabalho = sheet2.getByRole("link", { name: "Trabalho", exact: true });
+  await sheetTrabalho.waitFor();
+  await sheetTrabalho.click();
+  await page.waitForURL((url) => url.pathname === "/work");
+  await sheet2.waitFor({ state: "hidden" });
+  await scenario.context.close();
+
+  step = "unconfigured has no Trabalho";
+  scenario = await openScenario("/all");
+  await card("alpha:a-1").waitFor();
+  await eventually(() => scenario.state.capsAnswers > 0, "the capabilities read answered");
+  assert.equal(await page.getByRole("link", { name: "Trabalho", exact: true }).count(), 0, "no Trabalho link when unconfigured");
+  assert.equal(await page.locator('nav [data-nav-group="destinations"]').count(), 0, "no destinations group when unconfigured");
   await scenario.context.close();
 
   console.log("PASS all sidebar: entries, header, footer, switcher, resize, narrow screen, read-only, requests");

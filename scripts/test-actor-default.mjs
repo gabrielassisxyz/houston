@@ -1,13 +1,45 @@
 // Loads lib/config.ts in child processes with throwaway config dirs, git config
 // and launch directories. Never touches the real ~/.config or git settings.
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
+import ts from 'typescript';
 
-const configModule = fileURLToPath(new URL('../lib/config.ts', import.meta.url));
+const require = createRequire(import.meta.url);
+
+// Child entry: re-executes this script with SCOTTY_ACTOR_CHILD set. Runs first,
+// before any parent setup, so the child neither repeats git init nor leaks it.
+if (process.env.SCOTTY_ACTOR_CHILD) {
+  const loaded = {};
+  function load(name) {
+    if (loaded[name]) return loaded[name];
+    const code = ts.transpileModule(fs.readFileSync(new URL(`../lib/${name}.ts`, import.meta.url), 'utf8'), {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
+    }).outputText;
+    const exports = {};
+    const req = (id) => {
+      if (id === 'server-only') return {};
+      if (id.startsWith('./')) return load(id.slice(2));
+      return require(id);
+    };
+    vm.runInNewContext(code, { exports, require: req, structuredClone, Date, process, console, URL }, { filename: name });
+    return (loaded[name] = exports);
+  }
+  const plain = (v) => JSON.parse(JSON.stringify(v));
+  const config = load('config');
+  if (process.env.SCOTTY_ACTOR_SAVE) {
+    config.saveConfig(JSON.parse(process.env.SCOTTY_ACTOR_SAVE));
+  }
+  const c = config.getConfig();
+  console.log(JSON.stringify({ humanActor: c.humanActor, humanAllowlist: plain(c.humanAllowlist), humanActorChosen: c.humanActorChosen }));
+  process.exit(0);
+}
+
 const osUser = os.userInfo().username;
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'scotty-actor-'));
 const gitRepo = path.join(scratch, 'repo');
@@ -24,15 +56,15 @@ function load({ cwd = gitRepo, env = {}, onDisk, save } = {}) {
   const xdg = path.join(scratch, `xdg-${n++}`);
   fs.mkdirSync(path.join(xdg, 'houston'), { recursive: true });
   if (onDisk) fs.writeFileSync(path.join(xdg, 'houston', 'config.json'), JSON.stringify(onDisk));
-  const script = `
-    const { getConfig, saveConfig } = await import(${JSON.stringify(configModule)});
-    ${save ? `saveConfig(${JSON.stringify(save)});` : ''}
-    const c = getConfig();
-    console.log(JSON.stringify({ humanActor: c.humanActor, humanAllowlist: c.humanAllowlist, humanActorChosen: c.humanActorChosen }));`;
   const childEnv = { ...process.env, ...isolatedGit, XDG_CONFIG_HOME: xdg, ...env };
   if (!('BEADS_ACTOR' in env)) delete childEnv.BEADS_ACTOR;
-  const out = execFileSync(process.execPath, ['--conditions=react-server', '--no-warnings', '--input-type=module', '-e', script], { cwd, env: childEnv, encoding: 'utf8' });
-  return { ...JSON.parse(out.trim().split('\n').pop()), xdg };
+  delete childEnv.BEADS_REPO;
+  childEnv.SCOTTY_ACTOR_CHILD = '1';
+  if (save) childEnv.SCOTTY_ACTOR_SAVE = JSON.stringify(save);
+  else delete childEnv.SCOTTY_ACTOR_SAVE;
+  const res = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], { cwd, env: childEnv, encoding: 'utf8' });
+  assert.equal(res.status, 0, `child exited ${res.status}: ${res.stderr}`);
+  return { ...JSON.parse(res.stdout.trim().split('\n').pop()), xdg };
 }
 
 try {

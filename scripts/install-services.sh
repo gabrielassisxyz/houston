@@ -6,10 +6,13 @@
 #                               [--path <PATH>] [--port <n>] [--print]
 #                               [--notes-vault <dir>] [--notes-db <path>]
 #                               [--notes-port <n>] [--print-notes]
+#                               [--notes-backup-dir <dir>] [--print-notes-backup]
 set -euo pipefail
 
 LABEL="houston.hub"
 NOTES_LABEL="houston.notes"
+BACKUP_LABEL="houston.notes-backup"
+BACKUP_SERVICE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 HOST="127.0.0.1"
 PORT="3300"
 NOTES_PORT="3301"
@@ -18,10 +21,13 @@ CHECKOUT=""
 SERVICE_PATH=""
 PRINT_ONLY=0
 PRINT_NOTES_ONLY=0
+PRINT_BACKUP_ONLY=0
 NOTES_VAULT=""
 NOTES_DB=""
 NOTES_DB_SET=0
 NOTES_PORT_SET=0
+NOTES_BACKUP_DIR=""
+NOTES_BACKUP_DIR_SET=0
 
 usage() {
   cat <<'EOF'
@@ -42,10 +48,17 @@ Options:
   --notes-db <path>  Absolute path to the notes database file (default:
                      `${XDG_STATE_HOME:-$HOME/.local/state}/houston/notes.db`).
                      Requires --notes-vault.
-  --notes-port <n>  Port for the notes service on 127.0.0.1 (default: 3301).
+   --notes-port <n>  Port for the notes service on 127.0.0.1 (default: 3301).
                      Requires --notes-vault.
   --print-notes      Print the `houston.notes` plist to stdout without touching
                      disk or checking tools. Requires --notes-vault.
+  --notes-backup-dir <dir>  Absolute path to the synced folder holding the
+                      notes database backups. Enables the
+                      `houston.notes-backup` agent. Requires --notes-vault,
+                      and must not equal or lie inside --notes-vault.
+  --print-notes-backup  Print the `houston.notes-backup` plist to stdout
+                      without touching disk or checking tools. Requires
+                      --notes-vault and --notes-backup-dir.
   -h, --help         Show this help.
 EOF
 }
@@ -69,11 +82,11 @@ validate_xml_safe() {
 
 xml_escape() {
   local s=$1
-  s=${s//&/&amp;}
-  s=${s//</&lt;}
-  s=${s//>/&gt;}
-  s=${s//\"/&quot;}
-  s=${s//\'/&apos;}
+  s=${s//&/\&amp;}
+  s=${s//</\&lt;}
+  s=${s//>/\&gt;}
+  s=${s//\"/\&quot;}
+  s=${s//\'/\&apos;}
   printf '%s' "$s"
 }
 
@@ -243,6 +256,21 @@ while [ "$#" -gt 0 ]; do
       PRINT_NOTES_ONLY=1
       shift
       ;;
+    --notes-backup-dir)
+      [ "$#" -ge 2 ] || die "--notes-backup-dir requires a value"
+      NOTES_BACKUP_DIR=$2
+      NOTES_BACKUP_DIR_SET=1
+      shift 2
+      ;;
+    --notes-backup-dir=*)
+      NOTES_BACKUP_DIR=${1#--notes-backup-dir=}
+      NOTES_BACKUP_DIR_SET=1
+      shift
+      ;;
+    --print-notes-backup)
+      PRINT_BACKUP_ONLY=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -257,19 +285,35 @@ done
 if [ "$PRINT_ONLY" -eq 1 ] && [ "$PRINT_NOTES_ONLY" -eq 1 ]; then
   die "--print and --print-notes cannot be combined"
 fi
+if [ "$PRINT_ONLY" -eq 1 ] && [ "$PRINT_BACKUP_ONLY" -eq 1 ]; then
+  die "--print and --print-notes-backup cannot be combined"
+fi
+if [ "$PRINT_NOTES_ONLY" -eq 1 ] && [ "$PRINT_BACKUP_ONLY" -eq 1 ]; then
+  die "--print-notes and --print-notes-backup cannot be combined"
+fi
 if [ "$NOTES_DB_SET" -eq 1 ] && [ -z "$NOTES_VAULT" ]; then
   die "--notes-db requires --notes-vault"
 fi
 if [ "$NOTES_PORT_SET" -eq 1 ] && [ -z "$NOTES_VAULT" ]; then
   die "--notes-port requires --notes-vault"
 fi
+if [ "$NOTES_BACKUP_DIR_SET" -eq 1 ] && [ -z "$NOTES_VAULT" ]; then
+  die "--notes-backup-dir requires --notes-vault"
+fi
 if [ "$PRINT_NOTES_ONLY" -eq 1 ] && [ -z "$NOTES_VAULT" ]; then
   die "--print-notes requires --notes-vault"
 fi
+if [ "$PRINT_BACKUP_ONLY" -eq 1 ] && [ -z "$NOTES_VAULT" ]; then
+  die "--print-notes-backup requires --notes-vault"
+fi
+if [ "$PRINT_BACKUP_ONLY" -eq 1 ] && [ -z "$NOTES_BACKUP_DIR" ]; then
+  die "--print-notes-backup requires --notes-backup-dir"
+fi
 
-# Resolve defaults. --print-notes needs no --node, so skip the node default
-# and its absolute-path check in that mode; the notes document never uses it.
-if [ "$PRINT_NOTES_ONLY" -eq 0 ]; then
+# Resolve defaults. --print-notes and --print-notes-backup need no --node,
+# so skip the node default and its absolute-path check in those modes; neither
+# document uses it.
+if [ "$PRINT_NOTES_ONLY" -eq 0 ] && [ "$PRINT_BACKUP_ONLY" -eq 0 ]; then
   if [ -z "$NODE_BIN" ]; then
     NODE_BIN=$(command -v node 2>/dev/null || true)
     [ -n "$NODE_BIN" ] || die "could not find node on PATH; pass --node <absolute path>"
@@ -363,16 +407,34 @@ if [ "$NOTES_ENABLED" -eq 1 ]; then
   if notes_db_inside_vault "$norm_vault" "$norm_db"; then
     die "--notes-db must not equal or lie inside --notes-vault, got: $NOTES_DB"
   fi
+  if [ "$NOTES_BACKUP_DIR_SET" -eq 1 ]; then
+    case "$NOTES_BACKUP_DIR" in
+      /*) ;;
+      *) die "--notes-backup-dir must be an absolute path, got: $NOTES_BACKUP_DIR" ;;
+    esac
+    norm_backup=$(normalize_path "$NOTES_BACKUP_DIR")
+    if notes_db_inside_vault "$norm_vault" "$norm_backup"; then
+      die "--notes-backup-dir must not equal or lie inside --notes-vault, got: $NOTES_BACKUP_DIR"
+    fi
+  fi
+fi
+
+BACKUP_ENABLED=0
+if [ "$NOTES_BACKUP_DIR_SET" -eq 1 ]; then
+  BACKUP_ENABLED=1
 fi
 
 AGENTS_DIR="$HOME/Library/LaunchAgents"
 PLIST_FILE="$AGENTS_DIR/$LABEL.plist"
 NOTES_PLIST_FILE="$AGENTS_DIR/$NOTES_LABEL.plist"
+BACKUP_PLIST_FILE="$AGENTS_DIR/$BACKUP_LABEL.plist"
 LOG_DIR="$HOME/Library/Logs/houston"
 LOG_FILE="$LOG_DIR/hub.log"
 NOTES_LOG_FILE="$LOG_DIR/notes.log"
+BACKUP_LOG_FILE="$LOG_DIR/notes-backup.log"
 LAUNCHER="$CHECKOUT/bin/houston-web.mjs"
 NOTES_BIN="$CHECKOUT/notes/bin/houston"
+BACKUP_SCRIPT="$CHECKOUT/scripts/notes-backup.sh"
 APP_CONFIG_DIR="$CONFIG_HOME/houston"
 APP_CONFIG_FILE="$APP_CONFIG_DIR/config.json"
 
@@ -387,6 +449,9 @@ if [ "$NOTES_ENABLED" -eq 1 ]; then
   validate_xml_safe "--notes-vault" "$NOTES_VAULT"
   validate_xml_safe "--notes-db" "$NOTES_DB"
   validate_xml_safe "--notes-port" "$NOTES_PORT"
+fi
+if [ "$BACKUP_ENABLED" -eq 1 ]; then
+  validate_xml_safe "--notes-backup-dir" "$NOTES_BACKUP_DIR"
 fi
 
 render_plist() {
@@ -477,6 +542,44 @@ render_notes_plist() {
 EOF
 }
 
+render_backup_plist() {
+  cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$(xml_escape "$BACKUP_LABEL")</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>$(xml_escape "$BACKUP_SCRIPT")</string>
+    <string>$(xml_escape "$NOTES_DB")</string>
+    <string>$(xml_escape "$NOTES_BACKUP_DIR")</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>$(xml_escape "$BACKUP_SERVICE_PATH")</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>12</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>$(xml_escape "$BACKUP_LOG_FILE")</string>
+  <key>StandardErrorPath</key>
+  <string>$(xml_escape "$BACKUP_LOG_FILE")</string>
+</dict>
+</plist>
+EOF
+}
+
 if [ "$PRINT_ONLY" -eq 1 ]; then
   render_plist
   exit 0
@@ -487,11 +590,20 @@ if [ "$PRINT_NOTES_ONLY" -eq 1 ]; then
   exit 0
 fi
 
+if [ "$PRINT_BACKUP_ONLY" -eq 1 ]; then
+  render_backup_plist
+  exit 0
+fi
+
 # Whether the vault is a directory is checked only after --print-notes has had
 # its chance to exit, as --node is, so the document renders on Linux with
-# synthetic paths.
+# synthetic paths. The backup directory is checked only after
+# --print-notes-backup has had its chance to exit, for the same reason.
 if [ "$NOTES_ENABLED" -eq 1 ]; then
   [ -d "$NOTES_VAULT" ] || die "--notes-vault is not a directory: $NOTES_VAULT"
+fi
+if [ "$BACKUP_ENABLED" -eq 1 ]; then
+  [ -d "$NOTES_BACKUP_DIR" ] || die "--notes-backup-dir is not a directory: $NOTES_BACKUP_DIR"
 fi
 
 # Verify tools using the exact PATH the service will receive.
@@ -501,6 +613,9 @@ PATH="$SERVICE_PATH" command -v br >/dev/null 2>&1 || die "br not found in servi
 PATH="$SERVICE_PATH" command -v git >/dev/null 2>&1 || die "git not found in service PATH: $SERVICE_PATH"
 if [ "$NOTES_ENABLED" -eq 1 ]; then
   command -v go >/dev/null 2>&1 || die "go not found on PATH; install Go 1.26 or later (https://go.dev/dl/) and ensure go is on PATH"
+fi
+if [ "$BACKUP_ENABLED" -eq 1 ]; then
+  PATH="$BACKUP_SERVICE_PATH" command -v sqlite3 >/dev/null 2>&1 || die "sqlite3 not found in backup service PATH ($BACKUP_SERVICE_PATH); install sqlite3 so /usr/bin/sqlite3 exists"
 fi
 
 mkdir -p "$AGENTS_DIR" "$LOG_DIR" "$APP_CONFIG_DIR"
@@ -519,11 +634,23 @@ if [ "$NOTES_ENABLED" -eq 1 ]; then
   tmp_notes_plist=$(mktemp "$AGENTS_DIR/.${NOTES_LABEL}.plist.XXXXXX")
   trap 'rm -f "$tmp_plist" "$tmp_notes_plist"' EXIT
 fi
+if [ "$BACKUP_ENABLED" -eq 1 ]; then
+  tmp_backup_plist=$(mktemp "$AGENTS_DIR/.${BACKUP_LABEL}.plist.XXXXXX")
+  if [ "$NOTES_ENABLED" -eq 1 ]; then
+    trap 'rm -f "$tmp_plist" "$tmp_notes_plist" "$tmp_backup_plist"' EXIT
+  else
+    trap 'rm -f "$tmp_plist" "$tmp_backup_plist"' EXIT
+  fi
+fi
 render_plist > "$tmp_plist"
 mv "$tmp_plist" "$PLIST_FILE"
 if [ "$NOTES_ENABLED" -eq 1 ]; then
   render_notes_plist > "$tmp_notes_plist"
   mv "$tmp_notes_plist" "$NOTES_PLIST_FILE"
+fi
+if [ "$BACKUP_ENABLED" -eq 1 ]; then
+  render_backup_plist > "$tmp_backup_plist"
+  mv "$tmp_backup_plist" "$BACKUP_PLIST_FILE"
 fi
 trap - EXIT
 
@@ -531,6 +658,9 @@ uid=$(id -u)
 launchctl bootout "gui/$uid/$LABEL" >/dev/null 2>&1 || true
 if [ "$NOTES_ENABLED" -eq 1 ]; then
   launchctl bootout "gui/$uid/$NOTES_LABEL" >/dev/null 2>&1 || true
+fi
+if [ "$BACKUP_ENABLED" -eq 1 ]; then
+  launchctl bootout "gui/$uid/$BACKUP_LABEL" >/dev/null 2>&1 || true
 fi
 
 if [ "$NOTES_ENABLED" -eq 1 ]; then
@@ -540,4 +670,7 @@ fi
 launchctl bootstrap "gui/$uid" "$PLIST_FILE"
 if [ "$NOTES_ENABLED" -eq 1 ]; then
   launchctl bootstrap "gui/$uid" "$NOTES_PLIST_FILE"
+fi
+if [ "$BACKUP_ENABLED" -eq 1 ]; then
+  launchctl bootstrap "gui/$uid" "$BACKUP_PLIST_FILE"
 fi

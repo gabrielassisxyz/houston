@@ -42,11 +42,14 @@ func (r *Reconciler) ColdStart(ctx context.Context) error {
 	byUUID := make(map[string]cachedPathEntry, len(cached))
 	// byHash: content_hash → uuid (for hash-tiebreak move detection)
 	byHash := make(map[string]string, len(cached))
+	// byPath: path → uuid, so a file the walk skips still keeps its note alive.
+	byPath := make(map[string]string, len(cached))
 	for _, e := range cached {
 		byUUID[e.uuid] = e
 		if e.contentHash != "" {
 			byHash[e.contentHash] = e.uuid
 		}
+		byPath[e.path] = e.uuid
 	}
 
 	// --- Phase 2: walk vault, classify, act ---
@@ -55,6 +58,9 @@ func (r *Reconciler) ColdStart(ctx context.Context) error {
 	// hashTakenBy maps content_hash → uuid for files that were already processed as creates.
 	// Used so a "new" file with the same hash as a disappeared UUID is treated as a move.
 	hashTakenBy := make(map[string]string)
+	// found collects every note path the walk reached, so the reports of paths
+	// that are gone can be dropped afterwards.
+	found := make(map[string]struct{})
 
 	walkErr := filepath.WalkDir(r.vaultRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -75,9 +81,11 @@ func (r *Reconciler) ColdStart(ctx context.Context) error {
 			return nil
 		}
 
+		found[r.relPath(path)] = struct{}{}
+
 		// A single malformed or conflicting file must never abort cold-start and
 		// take down the whole server - log it and keep walking.
-		if rerr := r.reconcileFile(ctx, path, byUUID, byHash, seenUUIDs, hashTakenBy); rerr != nil {
+		if rerr := r.reconcileFile(ctx, path, byUUID, byHash, byPath, seenUUIDs, hashTakenBy); rerr != nil {
 			slog.Warn("coldstart: reconcile file failed; skipping", "path", path, "error", rerr)
 		}
 		return nil
@@ -85,6 +93,7 @@ func (r *Reconciler) ColdStart(ctx context.Context) error {
 	if walkErr != nil {
 		return fmt.Errorf("coldstart: walk: %w", walkErr)
 	}
+	r.keepReportsOnly(found)
 
 	// --- Phase 3: tombstone disappeared entries ---
 	for _, e := range cached {
@@ -115,23 +124,44 @@ func (r *Reconciler) reconcileFile(
 	absPath string,
 	byUUID map[string]cachedPathEntry,
 	byHash map[string]string,
+	byPath map[string]string,
 	seenUUIDs map[string]struct{},
 	hashTakenBy map[string]string,
 ) error {
+	relPath := r.relPath(absPath)
+	r.clearReports(relPath)
+
+	// A file skipped below is still on disk, so the note indexed at its path
+	// is still there: unmarked, the tombstone sweep would delete it because
+	// its file became a placeholder, or could not be read for a moment.
+	keepCachedNote := func() {
+		if id, ok := byPath[relPath]; ok {
+			seenUUIDs[id] = struct{}{}
+		}
+	}
+
 	raw, err := os.ReadFile(absPath)
 	if err != nil {
 		slog.Warn("coldstart: read file failed", "path", absPath, "error", err)
+		keepCachedNote()
+		return nil
+	}
+	if r.skipUnindexable(relPath, raw) {
+		keepCachedNote()
 		return nil
 	}
 
 	fm, parseErr := frontmatter.Parse(raw)
 	if parseErr != nil {
 		slog.Warn("coldstart: frontmatter parse failed", "path", absPath, "error", parseErr)
+		keepCachedNote()
 		return nil
 	}
+	// Here as well as in OnCreate and OnChange: a file unchanged since the
+	// last start reaches neither, and its report would not survive a restart.
+	r.reportPermission(relPath, fm)
 
 	diskHash := HashBytes(raw)
-	relPath := r.relPath(absPath)
 
 	// --- Classify ---
 
@@ -155,11 +185,19 @@ func (r *Reconciler) reconcileFile(
 					return fmt.Errorf("OnChange %q: %w", absPath, err)
 				}
 
-			case !samePath:
+			case r.pathStillHolds(entry.path, fm.ID):
+				// Another path holds this note, whichever of the two the walk
+				// reached first: this file is a copy and stays out.
+				r.reportDuplicate(relPath, fm.ID, entry.path)
+
+			default:
 				// Path moved while off.
 				if err := r.applyMove(ctx, entry, absPath, relPath, diskHash, raw, sameHash); err != nil {
 					return fmt.Errorf("move uuid=%q: %w", fm.ID, err)
 				}
+				// The walk's snapshot follows the move, or a second copy later
+				// in the walk would find the old path gone and take the note.
+				byUUID[fm.ID] = cachedPathEntry{uuid: fm.ID, path: relPath, contentHash: diskHash}
 			}
 			return nil
 		}
@@ -237,15 +275,18 @@ func (r *Reconciler) applyMove(
 	_ []byte, // raw - not used here but kept for signature clarity
 	sameHash bool,
 ) error {
-	// Update path cache: forget old path, upsert new path.
+	// Update path cache. The upsert is keyed by uuid, so it moves the row
+	// off the old path by itself; forgetting the old path by name would drop
+	// the row of a note that has since taken that path over.
+	var displaced *pendingDelete
 	if err := r.g.DoWrite(ctx, func(tx *graph.WriteTx) error {
-		if err := forgetInTx(tx, old.path); err != nil {
-			return err
-		}
-		return upsertInTx(tx, old.uuid, newRelPath, diskHash)
+		var err error
+		displaced, err = claimPathInTx(tx, old.uuid, newRelPath, diskHash)
+		return err
 	}); err != nil {
 		return fmt.Errorf("applyMove cache update: %w", err)
 	}
+	r.pathClaimed(old.uuid, displaced)
 
 	slog.Info("coldstart: move",
 		"uuid", old.uuid,
@@ -285,7 +326,9 @@ func (r *Reconciler) softDeleteCached(ctx context.Context, e cachedPathEntry) er
 		// -2 suffix. Forgetting it is exactly what this function exists to
 		// clean, and leaving it makes every later ColdStart re-derive the
 		// same false "nothing to do" conclusion.
-		if ferr := forgetPath(ctx, r.g, e.path); ferr != nil {
+		if ferr := r.g.DoWrite(ctx, func(tx *graph.WriteTx) error {
+			return forgetUUIDInTx(tx, e.uuid)
+		}); ferr != nil {
 			return ferr
 		}
 		return nil
@@ -300,8 +343,9 @@ func (r *Reconciler) softDeleteCached(ctx context.Context, e cachedPathEntry) er
 
 	author := nodes.Author{Name: "human"}
 	txErr := r.g.DoWrite(ctx, func(tx *graph.WriteTx) error {
-		// Remove path cache entry.
-		if err := forgetInTx(tx, e.path); err != nil {
+		// Remove path cache entry, by id: the walk may have given its cached
+		// path to the note that replaced it.
+		if err := forgetUUIDInTx(tx, e.uuid); err != nil {
 			return err
 		}
 		return nodes.SoftDeleteNoteTx(ctx, tx, e.uuid, stem, title, author)

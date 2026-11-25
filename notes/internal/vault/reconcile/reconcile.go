@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -19,10 +20,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gabrielassisxyz/houston/notes/internal/graph"
 	"github.com/gabrielassisxyz/houston/notes/internal/graph/nodes"
 	"github.com/gabrielassisxyz/houston/notes/internal/vault/frontmatter"
+	"github.com/gabrielassisxyz/houston/notes/internal/vault/vaultfile"
 	"github.com/gabrielassisxyz/houston/notes/internal/vault/wikilink"
 	"github.com/google/uuid"
 )
@@ -128,6 +131,73 @@ func forgetInTx(tx *graph.WriteTx, path string) error {
 		return fmt.Errorf("reconcile: forget path %q: %w", path, err)
 	}
 	return nil
+}
+
+// forgetUUIDInTx deletes the row of one note, wherever it points. A note
+// being tombstoned is removed by id rather than by its cached path, which
+// another note may have taken over in the meantime.
+func forgetUUIDInTx(tx *graph.WriteTx, uuid string) error {
+	_, err := tx.Exec(`DELETE FROM note_paths WHERE uuid = ?`, uuid)
+	if err != nil {
+		return fmt.Errorf("reconcile: forget uuid %q: %w", uuid, err)
+	}
+	return nil
+}
+
+// claimPathInTx binds relPath to id in the path cache.
+//
+// note_paths.path is unique, so a row at relPath held by another id would
+// refuse the upsert and leave this file out of the index for the whole run.
+// That row belongs to a note whose file was replaced in place - `mv other.md
+// note.md`, or a sync client's replacement - so it is removed and the note it
+// held is returned as a pending delete: it is tombstoned after the move window
+// unless its file shows up elsewhere first. The caller hands the result to
+// pathClaimed once its transaction has committed.
+func claimPathInTx(tx *graph.WriteTx, id, relPath, contentHash string) (*pendingDelete, error) {
+	holder, found, err := lookupInTx(tx, relPath)
+	if err != nil {
+		return nil, err
+	}
+	var displaced *pendingDelete
+	if found && holder != id {
+		if displaced, err = displacedNoteInTx(tx, holder, relPath); err != nil {
+			return nil, err
+		}
+		if err := forgetInTx(tx, relPath); err != nil {
+			return nil, err
+		}
+	}
+	if err := upsertInTx(tx, id, relPath, contentHash); err != nil {
+		return nil, err
+	}
+	return displaced, nil
+}
+
+// displacedNoteInTx describes, as a pending delete, the live note whose row at
+// relPath is about to be removed. It returns nil when the row's note is not
+// live, which leaves nothing to tombstone.
+func displacedNoteInTx(tx *graph.WriteTx, holder, relPath string) (*pendingDelete, error) {
+	var title string
+	err := tx.QueryRow(
+		`SELECT title FROM nodes WHERE id = ? AND type = 'note' AND deleted_at IS NULL`, holder,
+	).Scan(&title)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reconcile: read displaced note %q: %w", holder, err)
+	}
+	var hash sql.NullString
+	if err := tx.QueryRow(`SELECT content_hash FROM note_paths WHERE uuid = ?`, holder).Scan(&hash); err != nil && err != sql.ErrNoRows {
+		return nil, fmt.Errorf("reconcile: read displaced hash %q: %w", holder, err)
+	}
+	return &pendingDelete{
+		contentHash: hash.String,
+		relPath:     relPath,
+		nodeID:      holder,
+		stem:        stemFromRelPath(relPath),
+		title:       title,
+	}, nil
 }
 
 // SetPinned pins or unpins a note in the vault index. Returns graph.ErrNotFound
@@ -258,6 +328,9 @@ type Reconciler struct {
 	pendingMu      sync.Mutex
 	pendingDeletes map[string]*pendingDelete // keyed by nodeID
 
+	reportsMu sync.Mutex
+	reports   map[string]map[ReportKind]FileReport // keyed by vault-relative path
+
 	// counters - updated atomically
 	eventsProcessed  atomic.Int64
 	notesCreated     atomic.Int64
@@ -279,6 +352,7 @@ func New(g *graph.Graph, vaultRoot string) *Reconciler {
 		window:         defaultDeleteWindow,
 		now:            time.Now,
 		pendingDeletes: make(map[string]*pendingDelete),
+		reports:        make(map[string]map[ReportKind]FileReport),
 	}
 }
 
@@ -313,6 +387,9 @@ func (r *Reconciler) Stats() Stats {
 // If the path is unknown (no cache entry), the call is a no-op.
 func (r *Reconciler) OnDelete(ctx context.Context, absPath string) error {
 	relPath := r.relPath(absPath)
+	// Before the lookup: a file the index left out has no row, and the
+	// early return below would keep its report alive after the file is gone.
+	r.clearReports(relPath)
 
 	// Resolve path → UUID + nodeID inside a read tx
 	var nodeUUID, nodeID, contentHash, nodeTitle string
@@ -446,16 +523,21 @@ func (r *Reconciler) OnCreate(ctx context.Context, absPath string) error {
 	if err != nil {
 		return fmt.Errorf("reconcile OnCreate %q: read file: %w", absPath, err)
 	}
+	relPath := r.relPath(absPath)
+	r.clearReports(relPath)
+	if r.skipUnindexable(relPath, raw) {
+		return nil
+	}
 
 	fm, raw, err := parseAndInject(absPath, raw)
 	if err != nil {
 		return fmt.Errorf("reconcile OnCreate %q: frontmatter: %w", absPath, err)
 	}
+	r.reportPermission(relPath, fm)
 
 	author := ResolveAuthor(fm.Author)
 	title := resolveTitle(fm, absPath)
 	body := extractBody(raw)
-	relPath := r.relPath(absPath)
 	contentHash := HashBytes(raw)
 	noteID := fm.ID
 
@@ -467,6 +549,7 @@ func (r *Reconciler) OnCreate(ctx context.Context, absPath string) error {
 	if pending != nil {
 		// Move: cancel the tombstone, update path cache, preserve identity.
 		var promoted int
+		var displaced *pendingDelete
 		err = r.g.DoWrite(ctx, func(tx *graph.WriteTx) error {
 			// Check if the node was tombstoned already (race: expiry ran before us)
 			tombstoned, err := nodes.IsNoteTombstoned(ctx, tx, pending.nodeID)
@@ -506,14 +589,13 @@ func (r *Reconciler) OnCreate(ctx context.Context, absPath string) error {
 			promoted = p
 
 			// Upsert path cache to new location
-			if err := upsertInTx(tx, pending.nodeID, relPath, contentHash); err != nil {
-				return err
-			}
-			return nil
+			displaced, err = claimPathInTx(tx, pending.nodeID, relPath, contentHash)
+			return err
 		})
 		if err != nil {
 			return fmt.Errorf("reconcile OnCreate (move) %q: %w", absPath, err)
 		}
+		r.pathClaimed(pending.nodeID, displaced)
 
 		r.eventsProcessed.Add(1)
 		r.danglingPromoted.Add(int64(promoted))
@@ -560,6 +642,15 @@ func (r *Reconciler) OnCreate(ctx context.Context, absPath string) error {
 		}
 
 		if isLive {
+			// A live note can be adopted by a path only when no other path
+			// still holds it: a second file with the same id is a sync
+			// client's conflict copy or a duplicated template, not the note.
+			if holder, dup, err := r.duplicateHolder(ctx, noteID, relPath); err != nil {
+				return fmt.Errorf("reconcile OnCreate %q: %w", absPath, err)
+			} else if dup {
+				r.reportDuplicate(relPath, noteID, holder)
+				return nil
+			}
 			if err := r.adoptNote(ctx, absPath, relPath, contentHash, noteID, title, body, fm, author); err != nil {
 				return err
 			}
@@ -569,6 +660,7 @@ func (r *Reconciler) OnCreate(ctx context.Context, absPath string) error {
 		if wasTombstoned {
 			// Revive after expiry - the pending window already fired
 			var promoted int
+			var displaced *pendingDelete
 			stem := stemFromPath(absPath)
 			err = r.g.DoWrite(ctx, func(tx *graph.WriteTx) error {
 				if err := nodes.ReviveNoteTx(ctx, tx, noteID, stem, title, author); err != nil {
@@ -594,14 +686,13 @@ func (r *Reconciler) OnCreate(ctx context.Context, absPath string) error {
 					return fmt.Errorf("ResolveInTx (revive): %w", err)
 				}
 
-				if err := upsertInTx(tx, noteID, relPath, contentHash); err != nil {
-					return err
-				}
-				return nil
+				displaced, err = claimPathInTx(tx, noteID, relPath, contentHash)
+				return err
 			})
 			if err != nil {
 				return fmt.Errorf("reconcile OnCreate (revive) %q: %w", absPath, err)
 			}
+			r.pathClaimed(noteID, displaced)
 
 			r.eventsProcessed.Add(1)
 			r.notesRevived.Add(1)
@@ -620,6 +711,7 @@ func (r *Reconciler) OnCreate(ctx context.Context, absPath string) error {
 
 	// --- Fresh create ---
 	var promoted int
+	var displaced *pendingDelete
 	err = r.g.DoWrite(ctx, func(tx *graph.WriteTx) error {
 		n, err := noteFromFile(ctx, tx, noteID, fm, title, body)
 		if err != nil {
@@ -646,14 +738,13 @@ func (r *Reconciler) OnCreate(ctx context.Context, absPath string) error {
 		promoted = p
 
 		// Upsert path cache
-		if err := upsertInTx(tx, noteID, relPath, contentHash); err != nil {
-			return err
-		}
-		return nil
+		displaced, err = claimPathInTx(tx, noteID, relPath, contentHash)
+		return err
 	})
 	if err != nil {
 		return fmt.Errorf("reconcile OnCreate %q: %w", absPath, err)
 	}
+	r.pathClaimed(noteID, displaced)
 
 	r.eventsProcessed.Add(1)
 	r.notesCreated.Add(1)
@@ -679,6 +770,7 @@ func (r *Reconciler) adoptNote(
 	author nodes.Author,
 ) error {
 	var promoted int
+	var displaced *pendingDelete
 	err := r.g.DoWrite(ctx, func(tx *graph.WriteTx) error {
 		n, err := noteFromFile(ctx, tx, noteID, fm, title, body)
 		if err != nil {
@@ -695,11 +787,13 @@ func (r *Reconciler) adoptNote(
 			return fmt.Errorf("PromoteDanglingInTx (adopt): %w", err)
 		}
 		promoted = p
-		return upsertInTx(tx, noteID, relPath, contentHash)
+		displaced, err = claimPathInTx(tx, noteID, relPath, contentHash)
+		return err
 	})
 	if err != nil {
 		return fmt.Errorf("reconcile OnCreate (adopt) %q: %w", absPath, err)
 	}
+	r.pathClaimed(noteID, displaced)
 
 	r.eventsProcessed.Add(1)
 	r.danglingPromoted.Add(int64(promoted))
@@ -724,23 +818,40 @@ func (r *Reconciler) OnChange(ctx context.Context, absPath string) error {
 	if err != nil {
 		return fmt.Errorf("reconcile OnChange %q: read file: %w", absPath, err)
 	}
+	relPath := r.relPath(absPath)
+	r.clearReports(relPath)
+	if r.skipUnindexable(relPath, raw) {
+		return nil
+	}
 
 	fm, raw, err := parseAndInject(absPath, raw)
 	if err != nil {
 		return fmt.Errorf("reconcile OnChange %q: frontmatter: %w", absPath, err)
 	}
+	r.reportPermission(relPath, fm)
 
 	// If there's still no UUID after inject (very unusual), fall back to create.
 	if fm.ID == "" {
 		return r.OnCreate(ctx, absPath)
 	}
 
+	// The watcher reports a new file as a change, never as a create, so this
+	// is where a live copy of a note arrives. Updating the node from it would
+	// point the note at the copy; a different path is a move only when the
+	// note's own path no longer holds it.
+	if holder, dup, err := r.duplicateHolder(ctx, fm.ID, relPath); err != nil {
+		return fmt.Errorf("reconcile OnChange %q: %w", absPath, err)
+	} else if dup {
+		r.reportDuplicate(relPath, fm.ID, holder)
+		return nil
+	}
+
 	author := ResolveAuthor(fm.Author)
 	title := resolveTitle(fm, absPath)
 	body := extractBody(raw)
-	relPath := r.relPath(absPath)
 	contentHash := HashBytes(raw)
 
+	var displaced *pendingDelete
 	err = r.g.DoWrite(ctx, func(tx *graph.WriteTx) error {
 		n, err := noteFromFile(ctx, tx, fm.ID, fm, title, body)
 		if err != nil {
@@ -756,14 +867,13 @@ func (r *Reconciler) OnChange(ctx context.Context, absPath string) error {
 		}
 
 		// Refresh path cache
-		if err := upsertInTx(tx, fm.ID, relPath, contentHash); err != nil {
-			return err
-		}
-		return nil
+		displaced, err = claimPathInTx(tx, fm.ID, relPath, contentHash)
+		return err
 	})
 	if err != nil {
 		return fmt.Errorf("reconcile OnChange %q: %w", absPath, err)
 	}
+	r.pathClaimed(fm.ID, displaced)
 
 	r.eventsProcessed.Add(1)
 
@@ -777,6 +887,76 @@ func (r *Reconciler) OnChange(ctx context.Context, absPath string) error {
 }
 
 // --- helpers ---
+
+// duplicateHolder reports whether the note id is bound to a path other than
+// relPath that still holds it, and returns that path. The file at relPath is
+// then a second copy of the note and stays out of the index.
+func (r *Reconciler) duplicateHolder(ctx context.Context, id, relPath string) (string, bool, error) {
+	cached, found, err := LookupByUUID(ctx, r.g, id)
+	if err != nil {
+		return "", false, err
+	}
+	if !found || cached == relPath {
+		return "", false, nil
+	}
+	return cached, r.pathStillHolds(cached, id), nil
+}
+
+// pathStillHolds reports whether the file at the vault-relative path cached
+// for id is still that note's file. A file the reconciler would skip - one it
+// cannot read, a sync client's empty placeholder, one that is not UTF-8 or
+// does not parse - still is: reading it as gone would let a copy take the
+// note while the real file is only out of reach for a moment. Any other file
+// is the note's only while it carries the id; one with another id, or none,
+// has replaced it, and the note has moved wherever its id now is.
+func (r *Reconciler) pathStillHolds(relPath, id string) bool {
+	raw, err := os.ReadFile(filepath.Join(r.vaultRoot, relPath))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	if err != nil || len(raw) == 0 || !utf8.Valid(raw) {
+		return true
+	}
+	fm, err := frontmatter.Parse(raw)
+	if err != nil {
+		return true
+	}
+	return fm.ID == id
+}
+
+// skipUnindexable reports, and returns true for, a file the reconciler
+// neither indexes nor writes. A zero-byte file is what a sync client leaves as
+// a placeholder before the content arrives: injecting an id would write a
+// frontmatter block into it, and the content arriving later would then
+// conflict with the service's write. A file that is not valid UTF-8 is not
+// text the index can hold, and an id written into it would be a guess at its
+// encoding. The node of a note already indexed at that path is left as it was.
+func (r *Reconciler) skipUnindexable(relPath string, raw []byte) bool {
+	var kind ReportKind
+	switch {
+	case len(raw) == 0:
+		kind = ReportEmptyFile
+		r.report(relPath, kind, "zero bytes; left untouched until it has content")
+	case !utf8.Valid(raw):
+		kind = ReportInvalidUTF8
+		r.report(relPath, kind, "not valid UTF-8; left untouched")
+	default:
+		return false
+	}
+	slog.Warn("reconcile: file left out of the index", "path", relPath, "reason", string(kind))
+	return true
+}
+
+// reportDuplicate records that relPath was left out because holder keeps id.
+func (r *Reconciler) reportDuplicate(relPath, id, holder string) {
+	r.report(relPath, ReportDuplicateID, fmt.Sprintf("id %s is held by %s", id, holder))
+	slog.Warn("reconcile: duplicate id; file left out of the index",
+		"path", relPath,
+		"node_id", id,
+		"held_by", holder,
+		"decision", "duplicate",
+	)
+}
 
 // parseAndInject reads frontmatter and injects a UUID if absent.
 // It writes the updated bytes back to disk only when injection was needed.
@@ -793,7 +973,7 @@ func parseAndInject(absPath string, raw []byte) (*frontmatter.Frontmatter, []byt
 		if err != nil {
 			return nil, nil, fmt.Errorf("inject id: %w", err)
 		}
-		if err := os.WriteFile(absPath, updated, 0o644); err != nil {
+		if err := vaultfile.WriteFileAtomic(absPath, updated, 0o644); err != nil {
 			return nil, nil, fmt.Errorf("write injected id: %w", err)
 		}
 		raw = updated
@@ -878,7 +1058,9 @@ func NoteFromFile(fm *frontmatter.Frontmatter, title, body string) nodes.Note {
 		Origin:     nodes.NormalizeOrigin(fm.Origin),
 		Author:     fm.Author,
 		Permission: fm.Permission,
-		Tags:       fm.Tags,
+		Kind:       nodes.NormalizeNoteKind(fm.Kind),
+		Refs:       []string(fm.Refs),
+		Tags:       []string(fm.Tags),
 	}
 }
 
@@ -891,12 +1073,14 @@ func NoteFromFile(fm *frontmatter.Frontmatter, title, body string) nodes.Note {
 func noteFromFile(ctx context.Context, tx *graph.WriteTx, id string, fm *frontmatter.Frontmatter, title, body string) (nodes.Note, error) {
 	n := NoteFromFile(fm, title, body)
 	n.ID = id
-	// Refuse an unrecognised permission value here, at the moment the file
-	// becomes a note, rather than letting a typo'd policy sit in attrs and
-	// read as permissive at the surface. The resolver is the single definition
-	// of the mapping; the endpoint calls it again to answer the same question.
-	if _, err := ResolvePermission(fm.Permission, fm.Author); err != nil {
-		return nodes.Note{}, err
+	// An unrecognised permission value is stored as "ask", the most
+	// restrictive known one, at the moment the file becomes a note. Refusing
+	// it hid the whole note from the index over one typo'd field, and storing
+	// it as written would sit in attrs where every reader of the index has to
+	// refuse it again. The reconciler reports the file, so the typo is still
+	// seen; the write endpoint keeps refusing it, since a writer can be told.
+	if permissionUnknown(fm) {
+		n.Permission = PermissionAsk
 	}
 	existing, err := nodes.GetNote(ctx, tx.AsReadTx(), id)
 	if err == nil {
@@ -909,6 +1093,26 @@ func noteFromFile(ctx context.Context, tx *graph.WriteTx, id string, fm *frontma
 		return n, nil
 	}
 	return n, err
+}
+
+// permissionUnknown reports whether the file declares a permission that
+// ResolvePermission refuses.
+func permissionUnknown(fm *frontmatter.Frontmatter) bool {
+	_, err := ResolvePermission(fm.Permission, fm.Author)
+	return err != nil
+}
+
+// reportPermission records a file whose permission is indexed as "ask"
+// because the value it declares is unknown.
+func (r *Reconciler) reportPermission(relPath string, fm *frontmatter.Frontmatter) {
+	if !permissionUnknown(fm) {
+		return
+	}
+	r.report(relPath, ReportUnknownPermission, fmt.Sprintf("permission %q is unknown; indexed as %q", fm.Permission, PermissionAsk))
+	slog.Warn("reconcile: unknown permission; indexed as ask",
+		"path", relPath,
+		"permission", fm.Permission,
+	)
 }
 
 // LinkState is the link bookkeeping the endpoint writes onto a note after
@@ -1008,8 +1212,8 @@ func resolveTitle(fm *frontmatter.Frontmatter, absPath string) string {
 	return strings.TrimSuffix(base, filepath.Ext(base))
 }
 
-// WriteNoteBody rewrites the body of a note's vault markdown file in place,
-// preserving its frontmatter, so the file (the source of truth) reflects an
+// WriteNoteBody rewrites the body of a note's vault markdown file, preserving
+// its frontmatter, so the file (the source of truth) reflects an
 // in-graph body change. Callers that mutate a note's body directly via
 // nodes.UpdateNote (e.g. ingest/inbox merges) MUST also call this - otherwise
 // the file diverges and the merge is clobbered the next time the file is
@@ -1038,7 +1242,7 @@ func WriteNoteBody(ctx context.Context, g *graph.Graph, vaultRoot, noteID, newBo
 	// off leaves the frontmatter block plus its separator untouched.
 	body := extractBody(raw)
 	prefix := strings.TrimSuffix(string(raw), body)
-	if err := os.WriteFile(full, []byte(prefix+newBody), 0644); err != nil {
+	if err := vaultfile.WriteFileAtomic(full, []byte(prefix+newBody), 0o644); err != nil {
 		return false, fmt.Errorf("reconcile: write note %q: %w", full, err)
 	}
 	return true, nil
@@ -1076,44 +1280,15 @@ func locateNoteFile(ctx context.Context, g *graph.Graph, vaultRoot, noteID strin
 }
 
 // extractBody returns the content after the frontmatter block.
-// If no frontmatter is present, returns the full content.
+// If no frontmatter is present, returns the full content, and so does a block
+// that is opened and never closed: the file is read as body rather than lose
+// whatever follows the stray fence.
 func extractBody(raw []byte) string {
-	// Strip BOM
-	content := raw
-	if len(content) >= 3 && content[0] == 0xEF && content[1] == 0xBB && content[2] == 0xBF {
-		content = content[3:]
-	}
-
-	// Must start with "---\n" or "---\r\n"
-	if len(content) < 4 || content[0] != '-' || content[1] != '-' || content[2] != '-' {
+	fm := vaultfile.ScanFrontmatter(raw)
+	if fm.State != vaultfile.ClosedBlock {
 		return string(raw)
 	}
-	lineEnd := 3
-	if lineEnd < len(content) && content[lineEnd] == '\r' {
-		lineEnd++
-	}
-	if lineEnd >= len(content) || content[lineEnd] != '\n' {
-		return string(raw)
-	}
-	// Find the closing "---" fence
-	start := lineEnd + 1
-	for i := start; i < len(content)-2; i++ {
-		if content[i] == '-' && content[i+1] == '-' && content[i+2] == '-' {
-			// Must be preceded by newline
-			if i > 0 && content[i-1] == '\n' {
-				// Find end of closing fence line
-				j := i + 3
-				if j < len(content) && content[j] == '\r' {
-					j++
-				}
-				if j < len(content) && content[j] == '\n' {
-					j++
-				}
-				return string(bytes.TrimLeft(content[j:], "\n\r"))
-			}
-		}
-	}
-	return string(raw)
+	return string(bytes.TrimLeft(raw[fm.End:], "\n\r"))
 }
 
 // danglingKeysFor returns the PromoteKeys for a note: stem and title.
@@ -1184,6 +1359,30 @@ func (r *Reconciler) consumePendingDelete(noteID, contentHash string) *pendingDe
 	}
 
 	return nil
+}
+
+// pathClaimed finishes a committed claimPathInTx. The note now bound to a path
+// is live on disk, so a delete still pending for it - its old file removed
+// before this one appeared - is cancelled; the watcher reports the new file as
+// a change, so this is often the only place that can. A note the claim
+// displaced starts its move window here.
+func (r *Reconciler) pathClaimed(id string, displaced *pendingDelete) {
+	r.pendingMu.Lock()
+	delete(r.pendingDeletes, id)
+	if displaced != nil {
+		displaced.deletedAt = r.now()
+		r.pendingDeletes[displaced.nodeID] = displaced
+	}
+	r.pendingMu.Unlock()
+
+	if displaced != nil {
+		slog.Info("reconcile: path taken over; delete pending",
+			"path", displaced.relPath,
+			"node_id", displaced.nodeID,
+			"taken_by", id,
+			"decision", "pending",
+		)
+	}
 }
 
 // forgetPath removes a path from the note_paths cache.

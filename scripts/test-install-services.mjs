@@ -696,7 +696,325 @@ try {
     assert.equal(fs.readFileSync(updLog, "utf8"), "", "no bootout before missing-go refusal");
   }
 
-  console.log("PASS install-services and update scripts: hub, notes, plistlib, guards, and update order/recovery");
+  // 9. Backup: --print-notes-backup renders the third document with synthetic paths.
+  {
+    const backupPrintHome = path.join(scratch, "backup-print-home");
+    fs.mkdirSync(backupPrintHome);
+    const checkout = path.join(scratch, "syn-backup-checkout");
+    const vault = path.join(scratch, "syn-backup-vault");
+    const db = path.join(scratch, "syn-backup-state", "notes.db");
+    const backupDir = path.join(scratch, "my sync's folder");
+    const servicePath = "/opt/homebrew/bin:/usr/bin:/bin";
+    const baseEnv = { HOME: backupPrintHome, PATH: "/usr/bin:/bin" };
+    const xml = execFileSync(
+      installScript,
+      [
+        "--print-notes-backup",
+        "--notes-vault", vault,
+        "--notes-db", db,
+        "--notes-backup-dir", backupDir,
+        "--checkout", checkout,
+        "--path", servicePath,
+      ],
+      { env: baseEnv, encoding: "utf8" },
+    );
+    const plist = parsePlist(xml);
+    assert.equal(plist.Label, "houston.notes-backup");
+    assert.deepEqual(plist.ProgramArguments, [
+      "/bin/bash",
+      `${checkout}/scripts/notes-backup.sh`,
+      db,
+      backupDir,
+    ]);
+    assert.deepEqual(plist.EnvironmentVariables, {
+      PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+    });
+    assert.deepEqual(plist.StartCalendarInterval, { Hour: 12, Minute: 0 });
+    assert.equal(plist.RunAtLoad, true);
+    assert.equal(plist.KeepAlive, undefined, "backup agent has no KeepAlive");
+    assert.ok(!("KeepAlive" in plist), "backup plist carries no KeepAlive key");
+    const expectedBackupLog = `${backupPrintHome}/Library/Logs/houston/notes-backup.log`;
+    assert.equal(plist.StandardOutPath, expectedBackupLog);
+    assert.equal(plist.StandardErrorPath, expectedBackupLog);
+    // Synthetic paths need not exist for --print-notes-backup.
+    assert.equal(fs.existsSync(vault), false, "print-notes-backup works with a missing vault dir");
+    assert.equal(fs.existsSync(backupDir), false, "print-notes-backup works with a missing backup dir");
+    assert.deepEqual(fs.readdirSync(backupPrintHome), [], "--print-notes-backup creates nothing under HOME");
+    assert.equal(fs.existsSync(checkout), false, "--print-notes-backup creates nothing at checkout");
+
+    // Default db still applies when --notes-db is omitted.
+    const defHome = path.join(scratch, "backup-def-home");
+    fs.mkdirSync(defHome);
+    const defXml = execFileSync(
+      installScript,
+      [
+        "--print-notes-backup",
+        "--notes-vault", path.join(scratch, "syn-backup-vault2"),
+        "--notes-backup-dir", path.join(scratch, "syn-backup-dir2"),
+        "--checkout", checkout,
+        "--path", servicePath,
+      ],
+      { env: { HOME: defHome, PATH: "/usr/bin:/bin" }, encoding: "utf8" },
+    );
+    const defPlist = parsePlist(defXml);
+    assert.equal(defPlist.EnvironmentVariables.PATH, "/usr/bin:/bin:/usr/sbin:/sbin");
+    assert.equal(defPlist.ProgramArguments[2], `${defHome}/.local/state/houston/notes.db`);
+
+    // Hub and notes prints never leak the backup definition.
+    const hubXml = execFileSync(
+      installScript,
+      ["--print", "--node", "/opt/homebrew/bin/node", "--checkout", checkout, "--path", servicePath],
+      { env: baseEnv, encoding: "utf8" },
+    );
+    assert.ok(!hubXml.includes("notes-backup"), "--print output has no backup label");
+    assert.ok(!hubXml.includes("notes-backup.sh"), "--print output has no backup script");
+    assert.ok(!hubXml.includes("StartCalendarInterval"), "--print output has no backup schedule");
+    const notesXml = execFileSync(
+      installScript,
+      ["--print-notes", "--notes-vault", vault, "--checkout", checkout, "--path", servicePath],
+      { env: baseEnv, encoding: "utf8" },
+    );
+    assert.ok(!notesXml.includes("notes-backup"), "--print-notes output has no backup label");
+    assert.ok(!notesXml.includes("StartCalendarInterval"), "--print-notes output has no backup schedule");
+  }
+
+  // 10. Backup refusals: every new option and combination.
+  {
+    const rHome = path.join(scratch, "backup-refuse-home");
+    fs.mkdirSync(rHome);
+    const rBase = { HOME: rHome, PATH: "/usr/bin:/bin" };
+    const checkout = "/tmp/synthetic/checkout";
+    const servicePath = "/usr/bin:/bin";
+    const mustFail = (args, pattern, label, env = rBase) => {
+      const r = spawnSync(installScript, args, { env, encoding: "utf8" });
+      assert.notEqual(r.status, 0, `${label} is refused`);
+      assert.match(r.stderr, pattern, `${label} names the problem`);
+      return r;
+    };
+    mustFail(
+      ["--print", "--print-notes-backup", "--notes-vault", "/tmp/v", "--notes-backup-dir", "/tmp/b"],
+      /cannot be combined/i,
+      "--print with --print-notes-backup",
+    );
+    mustFail(
+      ["--print-notes", "--print-notes-backup", "--notes-vault", "/tmp/v", "--notes-backup-dir", "/tmp/b"],
+      /cannot be combined/i,
+      "--print-notes with --print-notes-backup",
+    );
+    mustFail(["--print-notes-backup"], /requires --notes-vault/i, "--print-notes-backup without anything");
+    mustFail(
+      ["--print-notes-backup", "--notes-vault", "/tmp/v"],
+      /requires --notes-backup-dir/i,
+      "--print-notes-backup without --notes-backup-dir",
+    );
+    mustFail(
+      ["--print-notes-backup", "--notes-backup-dir", "/tmp/b"],
+      /requires --notes-vault/i,
+      "--print-notes-backup without --notes-vault",
+    );
+    mustFail(["--notes-backup-dir", "/tmp/b"], /requires --notes-vault/i, "--notes-backup-dir without --notes-vault");
+    mustFail(
+      ["--print-notes-backup", "--notes-vault", "/tmp/v", "--notes-backup-dir", "relative/b", "--checkout", checkout, "--path", servicePath],
+      /absolute path/i,
+      "relative --notes-backup-dir",
+    );
+    mustFail(
+      ["--print-notes-backup", "--notes-vault", "/tmp/v", "--notes-backup-dir", "/tmp/v/backups", "--checkout", checkout, "--path", servicePath],
+      /must not equal or lie inside/i,
+      "--notes-backup-dir inside the vault",
+    );
+    mustFail(
+      ["--print-notes-backup", "--notes-vault", "/tmp/v", "--notes-backup-dir", "/tmp/v", "--checkout", checkout, "--path", servicePath],
+      /must not equal or lie inside/i,
+      "--notes-backup-dir equal to the vault",
+    );
+    mustFail(
+      ["--print-notes-backup", "--notes-vault", "/tmp/v", "--notes-backup-dir", "/tmp/v/../v/backups", "--checkout", checkout, "--path", servicePath],
+      /must not equal or lie inside/i,
+      "--notes-backup-dir inside vault via dot-dot",
+    );
+    mustFail(
+      ["--print-notes-backup", "--notes-vault", "/tmp/v", "--notes-backup-dir", "/tmp/w/../v/backups", "--checkout", checkout, "--path", servicePath],
+      /must not equal or lie inside/i,
+      "--notes-backup-dir that reaches the vault only through dot-dot",
+    );
+    mustFail(
+      ["--print-notes-backup", "--notes-vault", "/tmp/bad\nvault", "--notes-backup-dir", "/tmp/b", "--checkout", checkout, "--path", servicePath],
+      /control characters/i,
+      "newline in --notes-vault for backup print",
+    );
+    mustFail(
+      ["--print-notes-backup", "--notes-vault", "/tmp/v", "--notes-backup-dir", "/tmp/bad\nbackup", "--checkout", checkout, "--path", servicePath],
+      /control characters/i,
+      "newline in --notes-backup-dir",
+    );
+    // Real install with a backup dir that is not a directory is refused.
+    const fileBackup = path.join(scratch, "file-backup");
+    fs.writeFileSync(fileBackup, "not a dir");
+    const vaultDir = path.join(scratch, "backup-vault-dir");
+    fs.mkdirSync(vaultDir, { recursive: true });
+    mustFail(
+      ["--node", stubNode, "--path", serviceTools, "--notes-vault", vaultDir, "--notes-backup-dir", fileBackup, "--checkout", checkout],
+      /not a directory/i,
+      "--notes-backup-dir that is not a directory",
+      installEnv,
+    );
+    // The install script checks sqlite3 in the backup definition's PATH.
+    const scriptText = fs.readFileSync(installScript, "utf8");
+    assert.ok(scriptText.includes("sqlite3 not found in backup service PATH"), "install checks sqlite3 in the backup PATH");
+  }
+
+  // 11. Real backup install with stub launchctl/go: third plist, bootout/bootstrap order, idempotent.
+  {
+    const backupHome = path.join(scratch, "backup-home");
+    fs.mkdirSync(backupHome);
+    const backupCheckout = path.join(scratch, "backup-checkout");
+    fs.mkdirSync(path.join(backupCheckout, "notes"), { recursive: true });
+    const vaultDir = path.join(scratch, "backup-vault");
+    fs.mkdirSync(vaultDir, { recursive: true });
+    const backupDir = path.join(scratch, "my backup's synced folder");
+    fs.mkdirSync(backupDir, { recursive: true });
+    const goLog = path.join(scratch, "backup-go.log");
+    fs.writeFileSync(goLog, "");
+    const lcLog = path.join(scratch, "backup-lc.log");
+    fs.writeFileSync(lcLog, "");
+    const backupStubBin = path.join(scratch, "backup-stubbin");
+    fs.mkdirSync(backupStubBin);
+    makeStub(
+      backupStubBin,
+      "launchctl",
+      `printf 'launchctl %s\\n' "$*" >> ${JSON.stringify(lcLog)}\nexit 0`,
+    );
+    const goStubDir = path.join(scratch, "backup-gobin");
+    fs.mkdirSync(goStubDir);
+    makeGoStub(goStubDir, goLog);
+    const env = { HOME: backupHome, PATH: `${backupStubBin}:${goStubDir}:/usr/bin:/bin` };
+    const dbPath = path.join(scratch, "backup-state", "notes.db");
+    execFileSync(
+      installScript,
+      [
+        "--node", stubNode,
+        "--path", serviceTools,
+        "--port", "3300",
+        "--checkout", backupCheckout,
+        "--notes-vault", vaultDir,
+        "--notes-db", dbPath,
+        "--notes-port", "3305",
+        "--notes-backup-dir", backupDir,
+      ],
+      { env, encoding: "utf8" },
+    );
+    const hubPlist = path.join(backupHome, "Library", "LaunchAgents", "houston.hub.plist");
+    const notesPlistFile = path.join(backupHome, "Library", "LaunchAgents", "houston.notes.plist");
+    const backupPlistFile = path.join(backupHome, "Library", "LaunchAgents", "houston.notes-backup.plist");
+    assert.equal(fs.existsSync(hubPlist), true, "hub plist written with backup enabled");
+    assert.equal(fs.existsSync(notesPlistFile), true, "notes plist written with backup enabled");
+    assert.equal(fs.existsSync(backupPlistFile), true, "backup plist written");
+    const backupPlist = parsePlist(fs.readFileSync(backupPlistFile, "utf8"));
+    assert.equal(backupPlist.Label, "houston.notes-backup");
+    assert.deepEqual(backupPlist.ProgramArguments, [
+      "/bin/bash",
+      `${backupCheckout}/scripts/notes-backup.sh`,
+      dbPath,
+      backupDir,
+    ]);
+    assert.deepEqual(backupPlist.EnvironmentVariables, {
+      PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+    });
+    assert.deepEqual(backupPlist.StartCalendarInterval, { Hour: 12, Minute: 0 });
+    assert.equal(backupPlist.RunAtLoad, true);
+    assert.ok(!("KeepAlive" in backupPlist), "installed backup plist has no KeepAlive");
+    const expectedBackupLog = path.join(backupHome, "Library", "Logs", "houston", "notes-backup.log");
+    assert.equal(backupPlist.StandardOutPath, expectedBackupLog);
+    assert.equal(backupPlist.StandardErrorPath, expectedBackupLog);
+    // sqlite3 resolves through the backup definition's PATH on this machine.
+    const sqliteCheck = spawnSync("sh", ["-c", "PATH='/usr/bin:/bin:/usr/sbin:/sbin' command -v sqlite3"], { encoding: "utf8" });
+    assert.ok((sqliteCheck.stdout || "").trim(), "sqlite3 resolves in the backup service PATH");
+    const lcLines = fs.readFileSync(lcLog, "utf8").trim().split("\n");
+    assert.deepEqual(lcLines, [
+      `launchctl bootout gui/${uid}/houston.hub`,
+      `launchctl bootout gui/${uid}/houston.notes`,
+      `launchctl bootout gui/${uid}/houston.notes-backup`,
+      `launchctl bootstrap gui/${uid} ${hubPlist}`,
+      `launchctl bootstrap gui/${uid} ${notesPlistFile}`,
+      `launchctl bootstrap gui/${uid} ${backupPlistFile}`,
+    ]);
+    // Idempotent: second run writes identical plists.
+    const hubBefore = fs.readFileSync(hubPlist, "utf8");
+    const notesBefore = fs.readFileSync(notesPlistFile, "utf8");
+    const backupBefore = fs.readFileSync(backupPlistFile, "utf8");
+    fs.writeFileSync(goLog, "");
+    fs.writeFileSync(lcLog, "");
+    execFileSync(
+      installScript,
+      [
+        "--node", stubNode,
+        "--path", serviceTools,
+        "--port", "3300",
+        "--checkout", backupCheckout,
+        "--notes-vault", vaultDir,
+        "--notes-db", dbPath,
+        "--notes-port", "3305",
+        "--notes-backup-dir", backupDir,
+      ],
+      { env, encoding: "utf8" },
+    );
+    assert.equal(fs.readFileSync(hubPlist, "utf8"), hubBefore, "second hub plist identical with backup");
+    assert.equal(fs.readFileSync(notesPlistFile, "utf8"), notesBefore, "second notes plist identical with backup");
+    assert.equal(fs.readFileSync(backupPlistFile, "utf8"), backupBefore, "second backup plist identical");
+  }
+
+  // 12. Without --notes-backup-dir nothing about the backup agent changes.
+  {
+    const plainHome = path.join(scratch, "plain-notes-home");
+    fs.mkdirSync(plainHome);
+    const plainCheckout = path.join(scratch, "plain-checkout");
+    fs.mkdirSync(path.join(plainCheckout, "notes"), { recursive: true });
+    const vaultDir = path.join(scratch, "plain-vault");
+    fs.mkdirSync(vaultDir, { recursive: true });
+    const goLog = path.join(scratch, "plain-go.log");
+    fs.writeFileSync(goLog, "");
+    const lcLog = path.join(scratch, "plain-lc.log");
+    fs.writeFileSync(lcLog, "");
+    const plainStubBin = path.join(scratch, "plain-stubbin");
+    fs.mkdirSync(plainStubBin);
+    makeStub(
+      plainStubBin,
+      "launchctl",
+      `printf 'launchctl %s\\n' "$*" >> ${JSON.stringify(lcLog)}\nexit 0`,
+    );
+    const goStubDir = path.join(scratch, "plain-gobin");
+    fs.mkdirSync(goStubDir);
+    makeGoStub(goStubDir, goLog);
+    const env = { HOME: plainHome, PATH: `${plainStubBin}:${goStubDir}:/usr/bin:/bin` };
+    const dbPath = path.join(scratch, "plain-state", "notes.db");
+    execFileSync(
+      installScript,
+      [
+        "--node", stubNode,
+        "--path", serviceTools,
+        "--checkout", plainCheckout,
+        "--notes-vault", vaultDir,
+        "--notes-db", dbPath,
+      ],
+      { env, encoding: "utf8" },
+    );
+    assert.equal(
+      fs.existsSync(path.join(plainHome, "Library", "LaunchAgents", "houston.notes-backup.plist")),
+      false,
+      "notes install without --notes-backup-dir writes no backup plist",
+    );
+    const lcLines = fs.readFileSync(lcLog, "utf8").trim().split("\n");
+    assert.ok(!lcLines.some((l) => l.includes("houston.notes-backup")), "no backup bootout/bootstrap without --notes-backup-dir");
+    const hubPlist = parsePlist(fs.readFileSync(path.join(plainHome, "Library", "LaunchAgents", "houston.hub.plist"), "utf8"));
+    assert.equal(hubPlist.Label, "houston.hub");
+    assert.ok(!JSON.stringify(hubPlist).includes("notes-backup"), "hub document unchanged without backup");
+    const notesPlist = parsePlist(fs.readFileSync(path.join(plainHome, "Library", "LaunchAgents", "houston.notes.plist"), "utf8"));
+    assert.equal(notesPlist.Label, "houston.notes");
+    assert.ok(!JSON.stringify(notesPlist).includes("notes-backup"), "notes document unchanged without backup");
+  }
+
+  console.log("PASS install-services and update scripts: hub, notes, backup, plistlib, guards, and update order/recovery");
 } finally {
   // The notes update test mkdirs the checkout's notes/bin (ignored by git);
   // remove it when this branch has no notes/ of its own.

@@ -1,4 +1,4 @@
-import { removeProject, renameProject } from "@/lib/config";
+import { removeProject, updateProject } from "@/lib/config";
 import { resetStore } from "@/lib/store";
 import { ok, fail } from "@/lib/api";
 import { z } from "zod";
@@ -18,13 +18,17 @@ export async function DELETE(_req: Request, { params }: Ctx) {
   }
 }
 
-const renameSchema = z.object({ name: z.string().min(1) });
+const patchSchema = z
+  .object({ name: z.string().trim().min(1).optional(), pipelineRepo: z.string().optional() })
+  .refine((v) => v.name !== undefined || v.pipelineRepo !== undefined, {
+    message: "Invalid input",
+  });
 
 export async function PATCH(req: Request, { params }: Ctx) {
   try {
     const { id } = await params;
-    const { name } = renameSchema.parse(await req.json());
-    const entry = renameProject(id, name);
+    const patch = patchSchema.parse(await req.json());
+    const entry = updateProject(id, patch);
     if (!entry) return ok({ error: "not found" }, 404);
     return ok(entry);
   } catch (e) {
