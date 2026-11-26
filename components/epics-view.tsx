@@ -394,7 +394,7 @@ export function EpicsView({
                     {(() => {
                       const chainProject = projectOf(e)?.id ?? projectId;
                       const chainLocalId = displayId(e);
-                      if (caps.data?.chain !== true) return null;
+                      if (caps.data?.chain !== true && caps.data?.notes !== true) return null;
                       if (chainProject === ALL_PROJECT_ID) return null;
                       return (
                         <div className="m-[2px] rounded-[9px] bg-[var(--surface)] p-[9px_12px]">

@@ -1,11 +1,15 @@
 "use client";
 import * as React from "react";
 import { useChain } from "@/hooks/use-chain";
+import { useCapabilities } from "@/hooks/use-capabilities";
 import type {
   Chain,
   ChainApproval,
   ChainDescendant,
+  ChainDirectNote,
   ChainEpic,
+  ChainLinkedNote,
+  ChainNotes,
   ChainPipeline,
   TrackerItem,
 } from "@/lib/chain";
@@ -305,12 +309,82 @@ function PipelineBlock({ pipeline }: { pipeline: ChainPipeline }) {
   );
 }
 
+function hasNotesContent(notes: ChainNotes | null | undefined): boolean {
+  if (!notes) return false;
+  if (notes.state === "unavailable") return true;
+  return (
+    notes.plano.length > 0 ||
+    notes.implementacao.length > 0 ||
+    notes.evidencia.length > 0 ||
+    notes.nota.length > 0 ||
+    notes.linked.length > 0 ||
+    notes.linkedOmitted > 0
+  );
+}
+
 function isEmptyChain(chain: Chain): boolean {
   const hasTracker = chain.tracker !== null && chain.tracker !== undefined;
   const hasEpic = "epic" in chain && chain.epic !== null && chain.epic !== undefined;
   const hasDescendants = Array.isArray(chain.descendants) && chain.descendants.length > 0;
   const hasPipeline = chain.pipeline !== null && chain.pipeline !== undefined;
-  return !hasTracker && !hasEpic && !hasDescendants && !hasPipeline;
+  return !hasTracker && !hasEpic && !hasDescendants && !hasPipeline && !hasNotesContent(chain.notes);
+}
+
+function NoteRow({ note, linked }: { note: ChainDirectNote | ChainLinkedNote; linked?: boolean }) {
+  const attr = linked ? { "data-notes-linked": note.id } : { "data-notes-note": note.id };
+  return (
+    <div {...attr}>
+      <span>{note.title}</span>
+      {" · "}
+      <span>{note.path}</span>
+    </div>
+  );
+}
+
+function NotesGroup({
+  title,
+  kind,
+  notes,
+}: {
+  title: string;
+  kind: string;
+  notes: (ChainDirectNote | ChainLinkedNote)[];
+}) {
+  if (notes.length === 0) return null;
+  return (
+    <div data-notes-kind={kind}>
+      <span>{title}</span>
+      {notes.map((note) => (
+        <NoteRow key={note.id} note={note} linked={kind === "linked"} />
+      ))}
+    </div>
+  );
+}
+
+function NotesBlock({ notes }: { notes: ChainNotes }) {
+  if (notes.state === "unavailable") {
+    return (
+      <div data-notes-unavailable>
+        <span>Notas indisponíveis.</span>
+        {" · "}
+        <span>{notes.reason}</span>
+      </div>
+    );
+  }
+  return (
+    <div data-notes-available>
+      <NotesGroup title="Planejamento" kind="plano" notes={notes.plano} />
+      <NotesGroup title="Implementação" kind="implementacao" notes={notes.implementacao} />
+      <NotesGroup title="Evidências" kind="evidencia" notes={notes.evidencia} />
+      <NotesGroup title="Notas" kind="nota" notes={notes.nota} />
+      <NotesGroup title="Notas ligadas" kind="linked" notes={notes.linked} />
+      {notes.linkedOmitted > 0 && (
+        <div data-notes-omitted>
+          <span>{`e mais ${notes.linkedOmitted} notas ligadas`}</span>
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function ChainSection({
@@ -323,6 +397,16 @@ export function ChainSection({
   enabled?: boolean;
 }) {
   const query = useChain(projectId, beadId, enabled);
+  const caps = useCapabilities();
+  // With `chain` false there is no snapshot to confirm anything, so only the
+  // notes part is shown, without the tracker and pipeline items. While the
+  // capabilities read is pending the full chain is shown, as before.
+  const chainEnabled = caps.data ? caps.data.chain === true : true;
+  const empty = query.data
+    ? chainEnabled
+      ? isEmptyChain(query.data)
+      : !hasNotesContent(query.data.notes)
+    : false;
   return (
     <div lang="pt-BR" data-chain-section={`${projectId}:${beadId}`}>
       <h3>Relacionados</h3>
@@ -335,16 +419,18 @@ export function ChainSection({
           </button>
         </div>
       )}
-      {query.data && isEmptyChain(query.data) && (
+      {query.data && empty && (
         <div data-chain-empty>Nenhum item ligado a este bead.</div>
       )}
-      {query.data && !isEmptyChain(query.data) && (
+      {query.data && !empty && (
         <>
-          {query.data.tracker && <TrackerBlock tracker={query.data.tracker} />}
-          {"epic" in query.data && query.data.epic && <EpicRow epic={query.data.epic} />}
-          {Array.isArray(query.data.descendants) &&
+          {chainEnabled && query.data.tracker && <TrackerBlock tracker={query.data.tracker} />}
+          {chainEnabled && "epic" in query.data && query.data.epic && <EpicRow epic={query.data.epic} />}
+          {chainEnabled &&
+            Array.isArray(query.data.descendants) &&
             query.data.descendants.map((d) => <DescendantRow key={d.id} descendant={d} />)}
-          {query.data.pipeline && <PipelineBlock pipeline={query.data.pipeline} />}
+          {chainEnabled && query.data.pipeline && <PipelineBlock pipeline={query.data.pipeline} />}
+          {query.data.notes && <NotesBlock notes={query.data.notes} />}
         </>
       )}
     </div>
