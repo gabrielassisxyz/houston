@@ -13,6 +13,7 @@ import { useDefaultFocus } from "@/hooks/use-default-view";
 import { ViewerModeSetting } from "@/components/read-only-banner";
 import { KEYBOARD_SHORTCUT_GROUPS, isSubmitKey } from "@/lib/keyboard-shortcuts";
 import { KeyboardHelpDialog, ShortcutKeys } from "@/components/keyboard-help-dialog";
+import { useCapabilities } from "@/hooks/use-capabilities";
 
 const inputClass =
   "h-[38px] rounded-[9px] border border-border bg-[var(--surface-2)] px-3 text-[12.5px] text-[var(--text)] outline-none focus:border-[var(--brand)]";
@@ -345,10 +346,22 @@ function PipelineRepoCard({ project }: { project: { id: string; pipelineRepo?: s
 
 function KeyboardShortcutsCard() {
   const [helpOpen, setHelpOpen] = React.useState(false);
+  const caps = useCapabilities();
+  const showNotes = caps.data?.notes === true;
+  const groups = React.useMemo(
+    () =>
+      KEYBOARD_SHORTCUT_GROUPS.map((group) => ({
+        ...group,
+        shortcuts: group.shortcuts.filter(
+          (shortcut) => showNotes || shortcut.label !== "Search notes",
+        ),
+      })).filter((group) => group.shortcuts.length > 0),
+    [showNotes],
+  );
   return (
     <Card title="Keyboard shortcuts">
       <div className="grid grid-cols-1 gap-x-6 gap-y-4 md:grid-cols-2">
-        {KEYBOARD_SHORTCUT_GROUPS.map((group) => (
+        {groups.map((group) => (
           <section key={group.topic}>
             <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-[.08em] text-[var(--text-3)]">
               {group.topic}

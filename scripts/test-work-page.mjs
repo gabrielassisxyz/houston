@@ -448,14 +448,16 @@ try {
 
   // --- Capabilities failed at load, then held retry ---
   step = "capabilities failure and held retry";
-  let firstCaps = true;
+  // Every capabilities read fails until the retry, whichever reader makes it:
+  // the page has more than one (the work shell and the search shortcut), so
+  // failing only the first request would let another reader take the 500.
+  let failCaps = true;
   let releaseSecondCaps = null;
   const secondHeld = new Promise((resolve) => {
     releaseSecondCaps = resolve;
   });
   await page.route("**/api/capabilities", async (route) => {
-    if (firstCaps) {
-      firstCaps = false;
+    if (failCaps) {
       try {
         await route.fulfill({ status: 500, json: { error: "boom" } });
       } catch {}
@@ -470,6 +472,7 @@ try {
   await eventually(async () => (await status().innerText()).includes(CAPS_FAILED), "capabilities failed sentence");
   await retryButton().waitFor();
   // Next read held; click retry: button disabled, checking shown.
+  failCaps = false;
   const retryClick = retryButton().click();
   await eventually(async () => (await status().innerText()).includes(CHECKING), "checking during caps retry");
   assert.equal(await retryButton().isDisabled(), true, "caps retry disabled while refetching");

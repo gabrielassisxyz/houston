@@ -3,7 +3,7 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Plus, Trash2, FlaskConical, FolderGit2, Layers, CalendarRange, Loader2, Briefcase } from "lucide-react";
+import { Plus, Trash2, FlaskConical, FolderGit2, Layers, CalendarRange, Loader2, Briefcase, Search } from "lucide-react";
 import { Icon } from "@/components/icons";
 import { useTheme } from "@/components/theme-provider";
 import { useCapabilities } from "@/hooks/use-capabilities";
@@ -21,6 +21,7 @@ export function Launcher() {
   const real = projects.filter((p) => p.id !== "demo");
   const caps = useCapabilities();
   const showWork = !!caps.data?.workDashboardUrl;
+  const showSearch = caps.data?.notes === true;
 
   return (
     <div className="flex h-full flex-col overflow-y-auto bg-background text-foreground">
@@ -71,6 +72,7 @@ export function Launcher() {
             {real.length >= 1 && <SprintsCard />}
             {demo && <DemoCard />}
             {showWork && <WorkCard />}
+            {showSearch && <SearchCard />}
             {real.map((p) => (
               <ProjectCard key={p.id} project={p} />
             ))}
@@ -192,6 +194,26 @@ function WorkCard() {
       </div>
       <div className="text-[12px] text-[var(--text-3)]">
         Acompanhe o painel externo sem sair do Houston.
+      </div>
+    </CardShell>
+  );
+}
+
+function SearchCard() {
+  const router = useRouter();
+  return (
+    <CardShell onClick={() => router.push("/search")} lang="pt-BR">
+      <div className="flex items-center gap-[10px]">
+        <div className="flex h-[30px] w-[30px] items-center justify-center rounded-[9px] bg-[var(--brand-weak)] text-[var(--brand)]">
+          <Search size={16} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[14px] font-[620]">Busca</div>
+          <div className="text-[11px] text-[var(--text-3)]">busca de notas</div>
+        </div>
+      </div>
+      <div className="text-[12px] text-[var(--text-3)]">
+        Encontre notas do trabalho sem sair do Houston.
       </div>
     </CardShell>
   );

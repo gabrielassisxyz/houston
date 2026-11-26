@@ -15,6 +15,9 @@ export const ALL_PROJECT_ID = "@all";
 /** The work dashboard page has no project of its own, like the page over every project. */
 export const WORK_PAGE_ID = "@work";
 
+/** The notes search page has no project of its own, like the work dashboard page. */
+export const SEARCH_PAGE_ID = "@search";
+
 export interface ProjectRef {
   id: string;
   name: string;
