@@ -111,9 +111,26 @@ const PIPE_UNCONF = {
   issues: [...ISSUES, { part: 'budget', limit: 120 }],
 };
 
+const OBS_VAULT = 'My Vault';
+const OBS_PATH = 'notas/Café com espaço #1 & +.md';
+const OBS_HREF = `obsidian://open?vault=${encodeURIComponent(OBS_VAULT)}&file=${encodeURIComponent(OBS_PATH)}`;
+
+function decodeObsidian(href) {
+  assert.ok(href.startsWith('obsidian://open?'), `obsidian scheme and path: ${href}`);
+  const qs = href.slice('obsidian://open?'.length);
+  const parts = qs.split('&');
+  assert.equal(parts.length, 2, `vault and file params: ${href}`);
+  const params = {};
+  for (const part of parts) {
+    const i = part.indexOf('=');
+    params[part.slice(0, i)] = part.slice(i + 1);
+  }
+  return { vault: decodeURIComponent(params.vault), file: decodeURIComponent(params.file) };
+}
+
 const NOTES_AVAILABLE = {
   state: 'available',
-  plano: [{ id: 'n-plano', title: 'Stub plan', path: 'plans/stub.md', kind: 'plano', tags: [], matchedRefs: ['STRY00000001'] }],
+  plano: [{ id: 'n-plano', title: 'Stub plan', path: OBS_PATH, kind: 'plano', tags: [], matchedRefs: ['STRY00000001'] }],
   implementacao: [{ id: 'n-impl', title: 'Stub impl', path: 'impl/stub.md', kind: 'implementacao', tags: [], matchedRefs: ['STRY00000001'] }],
   evidencia: [{ id: 'n-evid', title: 'Stub evidence', path: 'evid/stub.md', kind: 'evidencia', tags: [], matchedRefs: ['STRY00000001'] }],
   nota: [{ id: 'n-nota', title: 'Stub note', path: 'notes/stub.md', kind: 'nota', tags: [], matchedRefs: ['STRY00000001'] }],
@@ -236,13 +253,13 @@ let page;
 let state;
 let step = 'start';
 
-async function open(url, { beads = projectBeads, chainEnabled = true, notesEnabled = false } = {}) {
+async function open(url, { beads = projectBeads, chainEnabled = true, notesEnabled = false, obsidianVault = null } = {}) {
   await page?.context().close();
   const context = await browser.newContext({ viewport: { width: 1500, height: 1000 } });
   page = await context.newPage();
   page.setDefaultTimeout(8000);
   page.on('pageerror', (e) => errors.push(`${step}: ${e.message}`));
-  state = { beads, writes: [], chainPaths: [], chainEnabled, notesEnabled, errorOnce: new Set(['t-error']), failEmpty: false };
+  state = { beads, writes: [], chainPaths: [], chainEnabled, notesEnabled, obsidianVault, errorOnce: new Set(['t-error']), failEmpty: false };
   await page.route('**/api/**', async (route) => {
     const request = route.request();
     const method = request.method();
@@ -295,7 +312,7 @@ async function open(url, { beads = projectBeads, chainEnabled = true, notesEnabl
       });
     }
     if (path === '/api/capabilities') {
-      return route.fulfill({ json: { workDashboardUrl: null, chain: state.chainEnabled, notes: state.notesEnabled, obsidianVault: null } });
+      return route.fulfill({ json: { workDashboardUrl: null, chain: state.chainEnabled, notes: state.notesEnabled, obsidianVault: state.obsidianVault } });
     }
     if (path.endsWith('/order')) return route.fulfill({ json: { orders: {} } });
     if (path === '/api/p/demo/activity') return route.fulfill({ json: { items: [] } });
@@ -370,16 +387,23 @@ try {
   await section.getByText('not-a-date', { exact: false }).first().waitFor();
   // Null tracker link renders no anchor.
   assert.equal(await section.locator('[data-chain-descendant="d-nulllink"] a').count(), 0, 'a tracker with link null renders no anchor');
-  // Every external link opens in a new tab with noopener noreferrer.
+  // Every http: and https: link opens in a new tab with noopener noreferrer.
+  // Obsidian links carry no target, so only http(s) anchors are asserted here.
   const anchors = section.locator('a');
   const anchorCount = await anchors.count();
   assert.ok(anchorCount > 0, 'the section has external links');
+  let httpCount = 0;
   for (let i = 0; i < anchorCount; i++) {
     const a = anchors.nth(i);
-    assert.equal(await a.getAttribute('target'), '_blank', `link ${i} targets a new tab`);
-    assert.ok((await a.getAttribute('rel') ?? '').includes('noopener'), `link ${i} rel has noopener`);
-    assert.ok((await a.getAttribute('rel') ?? '').includes('noreferrer'), `link ${i} rel has noreferrer`);
+    const href = await a.getAttribute('href');
+    if (href !== null && (href.startsWith('http://') || href.startsWith('https://'))) {
+      httpCount++;
+      assert.equal(await a.getAttribute('target'), '_blank', `link ${i} targets a new tab`);
+      assert.ok((await a.getAttribute('rel') ?? '').includes('noopener'), `link ${i} rel has noopener`);
+      assert.ok((await a.getAttribute('rel') ?? '').includes('noreferrer'), `link ${i} rel has noreferrer`);
+    }
   }
+  assert.ok(httpCount > 0, 'the section has http(s) links');
   // Summary rows carry no keyboard bead id.
   assert.equal(await section.locator('[data-keyboard-bead-id]').count(), 0, 'chain summary rows are not keyboard candidates');
   // Absent is never called closed.
@@ -539,6 +563,46 @@ try {
   await page.waitForTimeout(500);
   assert.equal(await page.locator('[data-chain-section]').count(), 0, 'no section in an expanded epic when neither is configured');
   assert.equal(state.chainPaths.length, 0, 'no chain request from an expanded epic when neither is configured');
+
+  // ── Obsidian links for notes ─────────────────────────────────────────────
+  step = 'notes link to Obsidian with encoding and no target';
+  await open('/p/demo?view=board&bead=ep-1', { chainEnabled: true, notesEnabled: true, obsidianVault: OBS_VAULT });
+  await page.getByRole('heading', { name: 'Relacionados', exact: true }).waitFor();
+  const obsSection = page.locator('[data-chain-section]');
+  await obsSection.getByText('Stub plan', { exact: true }).first().waitFor();
+  const noteAnchor = obsSection.locator('[data-notes-note="n-plano"] a');
+  assert.equal(await noteAnchor.count(), 1, 'one obsidian anchor for the note');
+  assert.equal(await noteAnchor.innerText(), OBS_PATH, 'anchor text is the path');
+  const noteHref = await noteAnchor.getAttribute('href');
+  assert.equal(noteHref, OBS_HREF, 'vault and file encoded with encodeURIComponent');
+  assert.equal(await noteAnchor.getAttribute('target'), null, 'no target on the obsidian link');
+  const decodedNote = decodeObsidian(noteHref);
+  assert.equal(decodedNote.vault, OBS_VAULT, 'vault decodes back');
+  assert.equal(decodedNote.file, OBS_PATH, 'path with spaces, accents, #, & and + decodes back');
+  // http(s) links in the same section still open in a new tab.
+  const mixedAnchors = obsSection.locator('a');
+  const mixedCount = await mixedAnchors.count();
+  let mixedHttp = 0;
+  for (let i = 0; i < mixedCount; i++) {
+    const a = mixedAnchors.nth(i);
+    const href = await a.getAttribute('href');
+    if (href !== null && (href.startsWith('http://') || href.startsWith('https://'))) {
+      mixedHttp++;
+      assert.equal(await a.getAttribute('target'), '_blank', `http link ${i} targets a new tab`);
+    } else {
+      assert.ok(href !== null && href.startsWith('obsidian://'), `non-http link ${i} is obsidian: ${href}`);
+      assert.equal(await a.getAttribute('target'), null, `obsidian link ${i} carries no target`);
+    }
+  }
+  assert.ok(mixedHttp > 0, 'the section keeps http(s) links beside the obsidian one');
+
+  step = 'notes show the plain path without the vault';
+  await open('/p/demo?view=board&bead=ep-1', { chainEnabled: true, notesEnabled: true });
+  await page.getByRole('heading', { name: 'Relacionados', exact: true }).waitFor();
+  const plainSection = page.locator('[data-chain-section]');
+  await plainSection.getByText('Stub plan', { exact: true }).first().waitFor();
+  assert.equal(await plainSection.locator('[data-notes-note="n-plano"] a').count(), 0, 'no anchor without the vault');
+  assert.match(await plainSection.locator('[data-notes-note="n-plano"]').innerText(), /Café com espaço/, 'plain path shows');
 
   assert.deepEqual(unrouted, [], `no stray requests: ${unrouted.join(', ')}`);
   assert.deepEqual(errors, []);

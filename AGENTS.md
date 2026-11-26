@@ -95,7 +95,7 @@ ignores for the same reason.
 There is no test runner and no `npm test`. The tests are standalone scripts under `scripts/`,
 run one at a time, and they come in three kinds:
 
-- **Pure**, no server: `node scripts/test-blocking.mjs`, `node scripts/test-install-services.mjs`, `node scripts/test-loopback-url.mjs`, `node scripts/test-doc-links.mjs`, `node scripts/test-external-ref.mjs`, `node scripts/test-config-values.mjs`, `node scripts/test-snapshot.mjs`, `node scripts/test-outbound-links.mjs`, `node scripts/test-chain.mjs`.
+- **Pure**, no server: `node scripts/test-blocking.mjs`, `node scripts/test-install-services.mjs`, `node scripts/test-loopback-url.mjs`, `node scripts/test-doc-links.mjs`, `node scripts/test-external-ref.mjs`, `node scripts/test-config-values.mjs`, `node scripts/test-snapshot.mjs`, `node scripts/test-outbound-links.mjs`, `node scripts/test-chain.mjs`, `node scripts/test-notes-service.mjs`, `node scripts/test-notes-backup.mjs` (needs `sqlite3` on `PATH`).
   They test scripts directly or load a module from `lib/` without a build (TypeScript transpile,
   then `vm`).
 - **Server-backed**: they drive the app over HTTP and need `SCOTTY_TEST_URL`. Run them through
