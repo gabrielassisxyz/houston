@@ -1,0 +1,350 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+// graphCall is what the fake API saw, so a test can assert the CLI issued the
+// right request instead of only checking what it printed.
+type graphCall struct {
+	method string
+	path   string
+	query  string
+}
+
+// fakeGraphAPI stands in for a running `houston serve`: it records every call
+// and answers with canned JSON.
+type fakeGraphAPI struct {
+	server *httptest.Server
+	calls  []graphCall
+	status int
+	body   string
+}
+
+func newFakeGraphAPI(t *testing.T, status int, body string) *fakeGraphAPI {
+	t.Helper()
+	f := &fakeGraphAPI{status: status, body: body}
+	f.server = httptest.NewServer(http.HandlerFunc(f.serve))
+	t.Cleanup(f.server.Close)
+	return f
+}
+
+func (f *fakeGraphAPI) serve(w http.ResponseWriter, r *http.Request) {
+	f.calls = append(f.calls, graphCall{method: r.Method, path: r.URL.Path, query: r.URL.RawQuery})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(f.status)
+	if f.body != "" {
+		_, _ = io.WriteString(w, f.body)
+	}
+}
+
+func (f *fakeGraphAPI) run(args ...string) (string, error) {
+	var out bytes.Buffer
+	err := runGraphCmd(&out, "", f.server.URL, false, args)
+	return out.String(), err
+}
+
+func (f *fakeGraphAPI) only(t *testing.T) graphCall {
+	t.Helper()
+	if len(f.calls) != 1 {
+		t.Fatalf("want exactly 1 API call, got %d: %+v", len(f.calls), f.calls)
+	}
+	return f.calls[0]
+}
+
+func TestGraphNodesListsAndPassesJSONThrough(t *testing.T) {
+	body := `[{"id":"n1","title":"Backups","type":"note"},{"id":"n2","title":"Ship v1","type":"task"}]`
+
+	fake := newFakeGraphAPI(t, http.StatusOK, body)
+	out, err := fake.run("nodes")
+	if err != nil {
+		t.Fatalf("graph nodes: %v", err)
+	}
+	call := fake.only(t)
+	if call.method != http.MethodGet || call.path != "/api/nodes" {
+		t.Errorf("want GET /api/nodes, got %s %s", call.method, call.path)
+	}
+	if call.query != "" {
+		t.Errorf("the route takes no parameters; got query %q", call.query)
+	}
+	for _, want := range []string{"n1", "Backups", "note", "2 node(s)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("summary missing %q, got: %s", want, out)
+		}
+	}
+
+	jsonFake := newFakeGraphAPI(t, http.StatusOK, body)
+	out, err = jsonFake.run("nodes", "--json")
+	if err != nil {
+		t.Fatalf("graph nodes --json: %v", err)
+	}
+	var decoded []map[string]any
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("--json output must be the API body verbatim, got %q: %v", out, err)
+	}
+	if len(decoded) != 2 || decoded[1]["type"] != "task" {
+		t.Errorf("--json lost fields: %v", decoded)
+	}
+}
+
+// The route answers `null` (not `[]`) for an empty graph; the listing must
+// still teach the next step rather than printing nothing.
+func TestGraphNodesEmptyTeachesNextStep(t *testing.T) {
+	fake := newFakeGraphAPI(t, http.StatusOK, `null`)
+	out, err := fake.run("nodes")
+	if err != nil {
+		t.Fatalf("graph nodes: %v", err)
+	}
+	if !strings.Contains(out, "houston note write") {
+		t.Errorf("empty graph must point at the houston fix, got: %s", out)
+	}
+	if strings.Contains(out, "kernl") {
+		t.Errorf("empty graph hint must not name kernl, got: %s", out)
+	}
+}
+
+func TestGraphSearchSendsQueryTypeAndLimit(t *testing.T) {
+	fake := newFakeGraphAPI(t, http.StatusOK, `[{"id":"n1","title":"Backups","type":"note"}]`)
+	out, err := fake.run("search", "--type", "note", "--limit", "5", "back", "ups")
+	if err != nil {
+		t.Fatalf("graph search: %v", err)
+	}
+
+	call := fake.only(t)
+	if call.method != http.MethodGet || call.path != "/api/nodes/search" {
+		t.Fatalf("want GET /api/nodes/search, got %s %s", call.method, call.path)
+	}
+	if call.query != "limit=5&q=back+ups&type=note" {
+		t.Errorf("unexpected query %q", call.query)
+	}
+	if !strings.Contains(out, "Backups") {
+		t.Errorf("search must print its hits, got: %s", out)
+	}
+}
+
+func TestGraphSearchOmitsFlagsNotGiven(t *testing.T) {
+	fake := newFakeGraphAPI(t, http.StatusOK, `[]`)
+	out, err := fake.run("search", "back")
+	if err != nil {
+		t.Fatalf("graph search: %v", err)
+	}
+	if call := fake.only(t); call.query != "q=back" {
+		t.Errorf("omitted flags must not be sent, got query %q", call.query)
+	}
+	if !strings.Contains(out, "No matches") {
+		t.Errorf("empty result must say so, got: %s", out)
+	}
+}
+
+func TestGraphSearchRequiresAQuery(t *testing.T) {
+	fake := newFakeGraphAPI(t, http.StatusOK, `[]`)
+	_, err := fake.run("search", "--type", "note")
+	if err == nil || !strings.Contains(err.Error(), "requires a query") {
+		t.Fatalf("missing query must fail loud, got: %v", err)
+	}
+	if exitCode(err) != 2 {
+		t.Errorf("missing argument is a usage error, got exit %d", exitCode(err))
+	}
+	if len(fake.calls) != 0 {
+		t.Errorf("a rejected invocation must not reach the API: %+v", fake.calls)
+	}
+}
+
+func TestGraphLimitMustBeAPositiveInteger(t *testing.T) {
+	for _, bad := range []string{"abc", "0", "-3"} {
+		fake := newFakeGraphAPI(t, http.StatusOK, `[]`)
+		_, err := fake.run("search", "--limit", bad, "back")
+		if err == nil || !strings.Contains(err.Error(), "--limit must be a positive integer") {
+			t.Fatalf("--limit %q must fail loud, got: %v", bad, err)
+		}
+		if exitCode(err) != 2 {
+			t.Errorf("want usage error, got exit %d", exitCode(err))
+		}
+		if len(fake.calls) != 0 {
+			t.Errorf("a rejected invocation must not reach the API: %+v", fake.calls)
+		}
+	}
+}
+
+func TestGraphRelatedEscapesTheIDAndForwardsTheLimit(t *testing.T) {
+	fake := newFakeGraphAPI(t, http.StatusOK, `[{"id":"n2","title":"Ship v1","type":"task"}]`)
+	out, err := fake.run("related", "node/1", "--limit", "3")
+	if err != nil {
+		t.Fatalf("graph related: %v", err)
+	}
+
+	call := fake.only(t)
+	if call.path != "/api/nodes/node/1/related" {
+		t.Fatalf("want the escaped related path, got %s", call.path)
+	}
+	if call.query != "limit=3" {
+		t.Errorf("limit not forwarded, got query %q", call.query)
+	}
+	if !strings.Contains(out, "Ship v1") {
+		t.Errorf("related must print its hits, got: %s", out)
+	}
+}
+
+func TestGraphEdgesPrintsTheConnections(t *testing.T) {
+	fake := newFakeGraphAPI(t, http.StatusOK, `[{"id":"e1","src":"n1","dst":"n2","label":"part_of"}]`)
+	out, err := fake.run("edges")
+	if err != nil {
+		t.Fatalf("graph edges: %v", err)
+	}
+	if call := fake.only(t); call.path != "/api/edges" {
+		t.Fatalf("want GET /api/edges, got %s", call.path)
+	}
+	for _, want := range []string{"n1", "part_of", "n2", "1 edge(s)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("edge listing missing %q, got: %s", want, out)
+		}
+	}
+
+	empty := newFakeGraphAPI(t, http.StatusOK, `[]`)
+	if out, err := empty.run("edges"); err != nil || !strings.Contains(out, "No edges") {
+		t.Errorf("empty edges must say so, got %q / %v", out, err)
+	}
+}
+
+func TestGraphEdgesScopedToANode(t *testing.T) {
+	fake := newFakeGraphAPI(t, http.StatusOK, `[{"id":"e1","src":"n1","dst":"n2","label":"part_of"}]`)
+	out, err := fake.run("edges", "n1")
+	if err != nil {
+		t.Fatalf("graph edges <node-id>: %v", err)
+	}
+	call := fake.only(t)
+	if call.path != "/api/nodes/n1/edges" {
+		t.Fatalf("want GET /api/nodes/n1/edges, got %s", call.path)
+	}
+	if call.query != "" {
+		t.Errorf("scoped form with no flags must send no query, got %q", call.query)
+	}
+	// Same printed shape as the unscoped form.
+	if !strings.Contains(out, "n2") {
+		t.Errorf("scoped edge listing missing the neighbour, got: %s", out)
+	}
+}
+
+func TestGraphEdgesScopedSendsResolveLabelAndType(t *testing.T) {
+	fake := newFakeGraphAPI(t, http.StatusOK, `[{"id":"n2","title":"Target","type":"note","path":"","label":"links_to","direction":"out","via":"n1","depth":1}]`)
+	out, err := fake.run("edges", "n1", "--resolve", "--label", "links_to", "--type", "note")
+	if err != nil {
+		t.Fatalf("graph edges <node-id> --resolve: %v", err)
+	}
+	call := fake.only(t)
+	if call.path != "/api/nodes/n1/edges" {
+		t.Fatalf("want GET /api/nodes/n1/edges, got %s", call.path)
+	}
+	if call.query != "label=links_to&resolve=true&type=note" {
+		t.Errorf("unexpected query %q", call.query)
+	}
+	// The resolved view prints the neighbour, not the edge endpoints.
+	for _, want := range []string{"out", "links_to", "Target"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("resolved edge listing missing %q, got: %s", want, out)
+		}
+	}
+}
+
+func TestGraphEdgesResolveWithoutANodeIDFailsLoud(t *testing.T) {
+	fake := newFakeGraphAPI(t, http.StatusOK, `[]`)
+	_, err := fake.run("edges", "--resolve")
+	if err == nil || !strings.Contains(err.Error(), "--resolve requires a node ID") {
+		t.Fatalf("--resolve without a node id must fail loud, got: %v", err)
+	}
+	if exitCode(err) != 2 {
+		t.Errorf("want usage error, got exit %d", exitCode(err))
+	}
+	if len(fake.calls) != 0 {
+		t.Errorf("a rejected invocation must not reach the API: %+v", fake.calls)
+	}
+}
+
+func TestGraphEdgesScopedRejectsUnknownFlags(t *testing.T) {
+	fake := newFakeGraphAPI(t, http.StatusOK, `[]`)
+	_, err := fake.run("edges", "n1", "--bogus")
+	if err == nil || !strings.Contains(err.Error(), "unknown flag") {
+		t.Fatalf("unknown flag must fail loud, got: %v", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Errorf("a rejected invocation must not reach the API: %+v", fake.calls)
+	}
+}
+
+func TestGraphAPIErrorsMapToExitCodes(t *testing.T) {
+	// A 400 is about the invocation and exits 2.
+	badRequest := newFakeGraphAPI(t, http.StatusBadRequest, "bad limit\n")
+	_, err := badRequest.run("related", "n1")
+	if err == nil || exitCode(err) != 2 {
+		t.Fatalf("a 400 must exit 2, got exit %d from %v", exitCode(err), err)
+	}
+	if !strings.Contains(err.Error(), "houston:") {
+		t.Errorf("API errors must carry the marker, got: %v", err)
+	}
+
+	broken := newFakeGraphAPI(t, http.StatusInternalServerError, `{"error":"boom"}`)
+	if _, err := broken.run("nodes"); err == nil || exitCode(err) != 1 {
+		t.Fatalf("a 500 must exit 1, got exit %d from %v", exitCode(err), err)
+	}
+}
+
+func TestGraphUnknownSubcommandHints(t *testing.T) {
+	var out bytes.Buffer
+	err := runGraphCmd(&out, "", "http://127.0.0.1:1", false, []string{"node"})
+	if err == nil || !strings.Contains(err.Error(), `did you mean "nodes"?`) {
+		t.Fatalf("typo'd subcommand must hint, got: %v", err)
+	}
+	if exitCode(err) != 2 {
+		t.Errorf("want usage error, got exit %d", exitCode(err))
+	}
+}
+
+func TestGraphReadOnlyVerbsRejectStrayPositionalArgs(t *testing.T) {
+	for _, args := range [][]string{{"nodes", "extra"}} {
+		fake := newFakeGraphAPI(t, http.StatusOK, `[]`)
+		_, err := fake.run(args...)
+		if err == nil || !strings.Contains(err.Error(), "takes no positional arguments") {
+			t.Fatalf("%v must fail loud, got: %v", args, err)
+		}
+		if len(fake.calls) != 0 {
+			t.Errorf("a rejected invocation must not reach the API: %+v", fake.calls)
+		}
+	}
+}
+
+// The split between the two search verbs: graph search is the editor's
+// title-prefix autocomplete, and houston search is the content-search verb.
+func TestGraphSearchHelpPointsToContentSearch(t *testing.T) {
+	var target *commandMeta
+	for i := range commandTable {
+		if commandTable[i].Name == "graph" {
+			target = &commandTable[i]
+			break
+		}
+	}
+	if target == nil {
+		t.Fatal(`no "graph" command in the table`)
+	}
+	var sub *commandMeta
+	for i := range target.Subs {
+		if target.Subs[i].Name == "search" {
+			sub = &target.Subs[i]
+			break
+		}
+	}
+	if sub == nil {
+		t.Fatal(`no "search" sub under "graph"`)
+	}
+	if !strings.Contains(sub.Details, "houston search") {
+		t.Errorf("graph search help must point to houston search for content search, got: %q", sub.Details)
+	}
+	if !strings.Contains(sub.Details, "not the content-search verb") {
+		t.Errorf("graph search help must state it is not the content-search verb, got: %q", sub.Details)
+	}
+}

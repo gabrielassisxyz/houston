@@ -52,7 +52,11 @@ func runHealthCmd(stdout io.Writer, configPath, serverFlag string, asJSON bool, 
 		return fmt.Errorf("houston health: reading the answer of %s: %w", baseURL, err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("houston health: %s answered %s - start a healthy one with: houston serve", baseURL, resp.Status)
+		msg := fmt.Sprintf("houston health: %s answered %s - start a healthy one with: houston serve", baseURL, resp.Status)
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			return usagef("%s", msg)
+		}
+		return fmt.Errorf("%s", msg)
 	}
 
 	if asJSON {
@@ -64,23 +68,50 @@ func runHealthCmd(stdout io.Writer, configPath, serverFlag string, asJSON bool, 
 	}
 	fmt.Fprintf(stdout, "%s  server %s\n", status.Status, baseURL)
 	fmt.Fprintf(stdout, "vault  %s\n", healthVaultLabel(status))
+	fmt.Fprintf(stdout, "indexing  %v\n", status.Indexing)
+	if len(status.Reports) > 0 {
+		names := make([]string, 0, len(status.Reports))
+		for k := range status.Reports {
+			names = append(names, k)
+		}
+		// Sorted, so repeated runs diff cleanly.
+		for i := 0; i < len(names); i++ {
+			for j := i + 1; j < len(names); j++ {
+				if names[j] < names[i] {
+					names[i], names[j] = names[j], names[i]
+				}
+			}
+		}
+		fmt.Fprintln(stdout, "reports:")
+		for _, k := range names {
+			fmt.Fprintf(stdout, "  %s: %d\n", k, status.Reports[k])
+		}
+	}
 	return nil
 }
 
-// healthStatusView is the subset of GET /api/health the summary prints.
+// healthStatusView is the subset of GET /api/health the summary prints:
+// liveness, the vault location, and the readiness the large-vault step adds
+// (indexing plus the per-kind file-report counts).
 type healthStatusView struct {
-	Status     string `json:"status"`
-	VaultRoot  string `json:"vaultRoot"`
-	VaultLabel string `json:"vaultLabel"`
+	Status     string         `json:"status"`
+	VaultRoot  string         `json:"vaultRoot"`
+	VaultLabel string         `json:"vaultLabel"`
+	Indexing   bool           `json:"indexing"`
+	Reports    map[string]int `json:"reports"`
 }
 
 // healthVaultLabel prefers the server's display label and falls back to the
-// root it also answers.
+// root it also answers. A server with no vault configured is worth saying out
+// loud, with the fix this binary owns.
 func healthVaultLabel(status healthStatusView) string {
 	if strings.TrimSpace(status.VaultLabel) != "" {
 		return status.VaultLabel
 	}
-	return status.VaultRoot
+	if strings.TrimSpace(status.VaultRoot) != "" {
+		return status.VaultRoot
+	}
+	return "(none configured - set vault.root in notes.yaml or HOUSTON_VAULT to the vault directory)"
 }
 
 // emitHealthJSON passes the server's own body along, pretty-printed when it
