@@ -64,6 +64,7 @@ has open, plus its readiness (indexing and file-report counts).`,
 	noteCommand,
 	graphCommand,
 	searchCommand,
+	linksCommand,
 }
 
 // commandNames returns the verb names in the table, for unknown-command hints.
