@@ -805,7 +805,7 @@ function DrawerBody({
           </Section>
         )}
 
-        {caps.data?.chain === true && (
+        {(caps.data?.chain === true || caps.data?.notes === true) && (
           <Section>
             <ChainSection projectId={projectId} beadId={bead.id} />
           </Section>

@@ -22,6 +22,7 @@ const projectBeads = [
   bead('t-empty', 'Empty task'),
   bead('t-error', 'Error task', { external_ref: 'STRY00000003' }),
   bead('t-loading', 'Loading task', { external_ref: 'STRY00000004' }),
+  bead('t-notes-unavail', 'Notes unavailable task', { external_ref: 'STRY00000005' }),
   epic('ep:colon', 'Colon epic', { external_ref: 'STRY00000001' }),
 ];
 
@@ -110,6 +111,17 @@ const PIPE_UNCONF = {
   issues: [...ISSUES, { part: 'budget', limit: 120 }],
 };
 
+const NOTES_AVAILABLE = {
+  state: 'available',
+  plano: [{ id: 'n-plano', title: 'Stub plan', path: 'plans/stub.md', kind: 'plano', tags: [], matchedRefs: ['STRY00000001'] }],
+  implementacao: [{ id: 'n-impl', title: 'Stub impl', path: 'impl/stub.md', kind: 'implementacao', tags: [], matchedRefs: ['STRY00000001'] }],
+  evidencia: [{ id: 'n-evid', title: 'Stub evidence', path: 'evid/stub.md', kind: 'evidencia', tags: [], matchedRefs: ['STRY00000001'] }],
+  nota: [{ id: 'n-nota', title: 'Stub note', path: 'notes/stub.md', kind: 'nota', tags: [], matchedRefs: ['STRY00000001'] }],
+  linked: [{ id: 'n-linked', title: 'Stub linked', path: 'linked/stub.md', kind: 'nota', tags: [] }],
+  linkedOmitted: 1,
+};
+const NOTES_UNAVAILABLE = { state: 'unavailable', reason: 'The notes service could not be reached.' };
+
 function chainPayload(id) {
   const baseBead = (bid, title, ref) => ({
     id: bid, projectId: 'demo', type: bid.startsWith('ep') ? 'epic' : 'task',
@@ -129,6 +141,7 @@ function chainPayload(id) {
           { id: 'd-nulllink', type: 'task', status: 'open', title: 'Desc nulllink', externalRef: 'STRY00000003', tracker: NULLLINK },
         ],
         pipeline: PIPE_PARTIAL,
+        notes: NOTES_AVAILABLE,
         snapshot: { available: true },
       };
     case 't-hist':
@@ -188,6 +201,15 @@ function chainPayload(id) {
         pipeline: PIPE_CONFIRMED,
         snapshot: { available: true },
       };
+    case 't-notes-unavail':
+      return {
+        bead: baseBead('t-notes-unavail', 'Notes unavailable task', 'STRY00000005'),
+        tracker: STORY,
+        epic: null,
+        pipeline: PIPE_CONFIRMED,
+        notes: NOTES_UNAVAILABLE,
+        snapshot: { available: true },
+      };
     case 'ep:colon':
       return {
         bead: { id: 'ep:colon', projectId: 'demo', type: 'epic', status: 'open', title: 'Colon epic', externalRef: 'STRY00000001' },
@@ -214,13 +236,13 @@ let page;
 let state;
 let step = 'start';
 
-async function open(url, { beads = projectBeads, chainEnabled = true } = {}) {
+async function open(url, { beads = projectBeads, chainEnabled = true, notesEnabled = false } = {}) {
   await page?.context().close();
   const context = await browser.newContext({ viewport: { width: 1500, height: 1000 } });
   page = await context.newPage();
   page.setDefaultTimeout(8000);
   page.on('pageerror', (e) => errors.push(`${step}: ${e.message}`));
-  state = { beads, writes: [], chainPaths: [], chainEnabled, errorOnce: new Set(['t-error']), failEmpty: false };
+  state = { beads, writes: [], chainPaths: [], chainEnabled, notesEnabled, errorOnce: new Set(['t-error']), failEmpty: false };
   await page.route('**/api/**', async (route) => {
     const request = route.request();
     const method = request.method();
@@ -273,7 +295,7 @@ async function open(url, { beads = projectBeads, chainEnabled = true } = {}) {
       });
     }
     if (path === '/api/capabilities') {
-      return route.fulfill({ json: { workDashboardUrl: null, chain: state.chainEnabled, notes: false, obsidianVault: null } });
+      return route.fulfill({ json: { workDashboardUrl: null, chain: state.chainEnabled, notes: state.notesEnabled, obsidianVault: null } });
     }
     if (path.endsWith('/order')) return route.fulfill({ json: { orders: {} } });
     if (path === '/api/p/demo/activity') return route.fulfill({ json: { items: [] } });
@@ -457,19 +479,66 @@ try {
   assert.ok(drawerPath, 'the /all drawer requested the chain');
   assert.ok(drawerPath.startsWith('/api/p/alpha/beads/ep-1/chain'), `the drawer request names the real project: ${drawerPath}`);
 
-  // ── With chain false: no section and no request ────────────────────────────
-  step = 'with chain false neither the drawer nor an expanded epic requests';
-  await open('/p/demo?view=board&bead=ep-1', { chainEnabled: false });
+  // ── Notes groups and unavailable ─────────────────────────────────────────
+  step = 'drawer shows notes groups in Portuguese';
+  await open('/p/demo?view=board&bead=ep-1', { chainEnabled: true, notesEnabled: true });
+  await page.getByRole('heading', { name: 'Relacionados', exact: true }).waitFor();
+  const notesSection = page.locator('[data-chain-section]');
+  await notesSection.getByText('Planejamento', { exact: true }).first().waitFor();
+  await notesSection.getByText('Implementação', { exact: true }).first().waitFor();
+  await notesSection.getByText('Evidências', { exact: true }).first().waitFor();
+  await notesSection.getByText('Notas', { exact: true }).first().waitFor();
+  await notesSection.getByText('Notas ligadas', { exact: true }).first().waitFor();
+  await notesSection.getByText('Stub plan', { exact: true }).first().waitFor();
+  await notesSection.getByText('Stub impl', { exact: true }).first().waitFor();
+  await notesSection.getByText('Stub evidence', { exact: true }).first().waitFor();
+  await notesSection.getByText('Stub note', { exact: true }).first().waitFor();
+  await notesSection.getByText('Stub linked', { exact: true }).first().waitFor();
+  await notesSection.getByText('e mais 1 notas ligadas', { exact: true }).first().waitFor();
+
+  step = 'drawer shows unavailable notes with the rest unchanged';
+  await open('/p/demo?view=board&bead=t-notes-unavail', { chainEnabled: true, notesEnabled: true });
+  const unavail = page.locator('[data-chain-section]');
+  await unavail.getByText('Notas indisponíveis.', { exact: true }).first().waitFor();
+  await unavail.getByText('The notes service could not be reached.', { exact: true }).first().waitFor();
+  await unavail.getByText('STRY00000001', { exact: true }).first().waitFor();
+
+  // ── Only notes configured: section without tracker or não confirmado ─────
+  step = 'drawer with only notes shows notes alone';
+  await open('/p/demo?view=board&bead=ep-1', { chainEnabled: false, notesEnabled: true });
+  await page.getByRole('heading', { name: 'Relacionados', exact: true }).waitFor();
+  const onlyNotes = page.locator('[data-chain-section]');
+  await onlyNotes.getByText('Planejamento', { exact: true }).first().waitFor();
+  assert.equal(await onlyNotes.locator('[data-tracker-state]').count(), 0, 'no tracker item when only notes is configured');
+  assert.equal(await onlyNotes.locator('[data-pipeline-state]').count(), 0, 'no pipeline item when only notes is configured');
+  assert.equal(await onlyNotes.locator('[data-chain-epic]').count(), 0, 'no epic row when only notes is configured');
+  assert.equal(await onlyNotes.locator('[data-chain-descendant]').count(), 0, 'no descendant rows when only notes is configured');
+  assert.equal(await onlyNotes.getByText('não confirmado', { exact: true }).count(), 0, 'no não confirmado when only notes is configured');
+  assert.ok(state.chainPaths.length >= 1, 'the drawer requests the chain when only notes is configured');
+
+  step = 'epic view with only notes shows notes alone';
+  await open('/p/demo?view=epics', { chainEnabled: false, notesEnabled: true });
+  await page.locator('[data-epic-id="ep-1"]').waitFor();
+  await page.locator('[data-epic-id="ep-1"]').click();
+  const epicNotes = page.locator('[data-epic-id="ep-1"] [data-chain-section]');
+  await epicNotes.getByText('Planejamento', { exact: true }).first().waitFor();
+  assert.equal(await epicNotes.locator('[data-tracker-state]').count(), 0, 'no tracker item in the epic view when only notes is configured');
+  assert.equal(await epicNotes.locator('[data-pipeline-state]').count(), 0, 'no pipeline item in the epic view when only notes is configured');
+  assert.equal(await epicNotes.getByText('não confirmado', { exact: true }).count(), 0, 'no não confirmado in the epic view when only notes is configured');
+
+  // ── With neither chain nor notes: no section and no request ────────────────
+  step = 'with neither chain nor notes neither the drawer nor an expanded epic requests';
+  await open('/p/demo?view=board&bead=ep-1', { chainEnabled: false, notesEnabled: false });
   await drawer().getByRole('heading', { name: 'Epic one', exact: true }).waitFor();
   await page.waitForTimeout(500);
-  assert.equal(await page.locator('[data-chain-section]').count(), 0, 'no section in the drawer when chain is false');
-  assert.equal(state.chainPaths.length, 0, 'no chain request from the drawer when chain is false');
-  await open('/p/demo?view=epics', { chainEnabled: false });
+  assert.equal(await page.locator('[data-chain-section]').count(), 0, 'no section in the drawer when neither is configured');
+  assert.equal(state.chainPaths.length, 0, 'no chain request from the drawer when neither is configured');
+  await open('/p/demo?view=epics', { chainEnabled: false, notesEnabled: false });
   await page.locator('[data-epic-id="ep-1"]').waitFor();
   await page.locator('[data-epic-id="ep-1"]').click();
   await page.waitForTimeout(500);
-  assert.equal(await page.locator('[data-chain-section]').count(), 0, 'no section in an expanded epic when chain is false');
-  assert.equal(state.chainPaths.length, 0, 'no chain request from an expanded epic when chain is false');
+  assert.equal(await page.locator('[data-chain-section]').count(), 0, 'no section in an expanded epic when neither is configured');
+  assert.equal(state.chainPaths.length, 0, 'no chain request from an expanded epic when neither is configured');
 
   assert.deepEqual(unrouted, [], `no stray requests: ${unrouted.join(', ')}`);
   assert.deepEqual(errors, []);

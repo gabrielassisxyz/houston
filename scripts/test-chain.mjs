@@ -26,7 +26,7 @@ function load(name) {
 }
 
 const format = load('snapshot-format');
-const { resolveChain } = load('chain');
+const { resolveChain, collectChainRefIds, mergeNotesAnswers, groupNotesAnswer } = load('chain');
 
 const fixtureText = readFileSync(new URL('./fixtures/snapshot-v1.json', import.meta.url), 'utf8');
 const base = () => JSON.parse(fixtureText);
@@ -84,8 +84,8 @@ function checkShape(value, at) {
   if (value.freshness === 'historical') assert.equal(typeof value.lastConfirmedAt, 'string', `${at}: historical has a time`);
 }
 
-function chainOf(target, beads, project, read, settings = SETTINGS) {
-  const chain = resolveChain(target, beads, project, read, settings);
+function chainOf(target, beads, project, read, settings = SETTINGS, notes) {
+  const chain = resolveChain(target, beads, project, read, settings, notes);
   checkShape(chain, 'chain');
   assert.deepEqual(JSON.parse(JSON.stringify(chain)), chain, 'the chain survives JSON unchanged');
   return chain;
@@ -395,6 +395,113 @@ const byKey = (...keys) => fixtureRecords().filter((r) => keys.includes(r.key));
     }
   }
   assert.equal(chainOf(loose, beads, DEMO, FIXTURE).bead.projectId, 'demo', 'the demo project id');
+}
+
+// ----------------------------------------------------------------- collectChainRefIds
+
+// An epic asks about its id, every descendant's id and every external_ref
+// among them; a task asks about its id and its external_ref, never siblings'.
+{
+  assert.deepEqual(collectChainRefIds(epic, beads), [
+    'E', 'T1', 'T2', 'G', 'F',
+    'STRY00000001', 'INC00000001', 'CHG00000002', 'STRY00000009',
+  ], 'epic: ids then refs, trimmed');
+  assert.deepEqual(collectChainRefIds(grandchild, beads), ['G', 'CHG00000002'], 'task: its id and its ref only');
+  assert.deepEqual(collectChainRefIds(beads.find((b) => b.id === 'T2'), beads), ['T2'], 'a task without a ref: its id only');
+  // De-duplicated without regard to case, keeping the first spelling.
+  const dupes = [
+    { id: 'DUP', title: 't', status: 'open', issue_type: 'task', external_ref: 'dup', dependencies: [] },
+    { id: 'other', title: 't', status: 'open', issue_type: 'task', dependencies: [] },
+  ];
+  assert.deepEqual(collectChainRefIds(dupes[0], dupes), ['DUP'], 'an external_ref duplicating the id case-insensitively is dropped');
+}
+
+// An external_ref holding a comma is left out: the refs route would split it.
+{
+  const commaRef = { id: 'C1', title: 't', status: 'open', issue_type: 'task', external_ref: 'STRY00000001,INC00000001', dependencies: [] };
+  assert.deepEqual(collectChainRefIds(commaRef, [commaRef]), ['C1'], 'a comma ref is left out for a task');
+  const commaEpic = { id: 'CE', title: 't', status: 'open', issue_type: 'epic', external_ref: 'a,b', dependencies: [] };
+  const commaChild = { id: 'CC', title: 't', status: 'open', issue_type: 'task', external_ref: 'STRY00000001', dependencies: [{ issue_id: 'CC', depends_on_id: 'CE', type: 'parent-child' }] };
+  assert.deepEqual(collectChainRefIds(commaEpic, [commaEpic, commaChild]), ['CE', 'CC', 'STRY00000001'], 'a comma ref is left out for an epic');
+}
+
+// ----------------------------------------------------------------------------------- notes
+
+// Without a notes answer the chain carries no notes part.
+{
+  assert.ok(!('notes' in chainOf(epic, beads, PROJECT_A, FIXTURE)), 'no notes answer: no notes part');
+}
+
+// A fixture refs answer is grouped by kind, then linked and linkedOmitted.
+{
+  const answer = {
+    notes: [
+      { id: 'n-plano', title: 'Plan', path: 'a/plan.md', kind: 'plano', tags: ['t'], matchedRefs: ['E'] },
+      { id: 'n-impl', title: 'Impl', path: 'b/impl.md', kind: 'implementacao', tags: [], matchedRefs: ['E', 'T1'] },
+      { id: 'n-evid', title: 'Evid', path: 'c/evid.md', kind: 'evidencia', tags: [], matchedRefs: ['STRY00000001'] },
+      { id: 'n-nota', title: 'Note', path: 'd/note.md', kind: 'nota', tags: [], matchedRefs: ['E'] },
+    ],
+    linked: [{ id: 'l-1', title: 'Linked one', path: 'l/one.md', kind: 'nota', tags: [] }],
+    linkedOmitted: 0,
+  };
+  const chain = chainOf(epic, beads, PROJECT_A, FIXTURE, SETTINGS, answer);
+  assert.deepEqual(chain.notes, {
+    state: 'available',
+    plano: [{ id: 'n-plano', title: 'Plan', path: 'a/plan.md', kind: 'plano', tags: ['t'], matchedRefs: ['E'] }],
+    implementacao: [{ id: 'n-impl', title: 'Impl', path: 'b/impl.md', kind: 'implementacao', tags: [], matchedRefs: ['E', 'T1'] }],
+    evidencia: [{ id: 'n-evid', title: 'Evid', path: 'c/evid.md', kind: 'evidencia', tags: [], matchedRefs: ['STRY00000001'] }],
+    nota: [{ id: 'n-nota', title: 'Note', path: 'd/note.md', kind: 'nota', tags: [], matchedRefs: ['E'] }],
+    linked: [{ id: 'l-1', title: 'Linked one', path: 'l/one.md', kind: 'nota', tags: [] }],
+    linkedOmitted: 0,
+  }, 'notes grouped by kind');
+  assert.deepEqual(groupNotesAnswer(answer).plano.map((n) => n.id), ['n-plano'], 'groupNotesAnswer groups directly');
+}
+
+// Merging two batches whose linked lists overlap: direct notes merged by id
+// with matchedRefs joined, directs dropped from linked, linked de-duplicated,
+// sorted by path and cut to 20, omitted summed plus the cut.
+{
+  const batch1 = {
+    notes: [{ id: 'n-1', title: 'One', path: 'b/one.md', kind: 'plano', tags: ['b'], matchedRefs: ['E'] }],
+    linked: [
+      { id: 'l-common', title: 'Common', path: 'l/common.md', kind: 'nota', tags: [] },
+      { id: 'l-a', title: 'A', path: 'l/a.md', kind: 'nota', tags: [] },
+      { id: 'n-2', title: 'Two', path: 'a/two.md', kind: 'nota', tags: [] },
+    ],
+    linkedOmitted: 1,
+  };
+  const batch2 = {
+    notes: [
+      { id: 'n-1', title: 'One', path: 'b/one.md', kind: 'plano', tags: ['a'], matchedRefs: ['T1'] },
+      { id: 'n-2', title: 'Two', path: 'a/two.md', kind: 'nota', tags: [], matchedRefs: ['T1'] },
+    ],
+    linked: [
+      { id: 'l-common', title: 'Common', path: 'l/common.md', kind: 'nota', tags: [] },
+      { id: 'l-b', title: 'B', path: 'l/b.md', kind: 'nota', tags: [] },
+    ],
+    linkedOmitted: 2,
+  };
+  const merged = mergeNotesAnswers([batch1, batch2]);
+  assert.deepEqual(merged.notes.map((n) => n.id), ['n-2', 'n-1'], 'direct notes sorted by path');
+  assert.deepEqual(merged.notes.find((n) => n.id === 'n-1').matchedRefs, ['E', 'T1'], 'matchedRefs joined and sorted');
+  assert.deepEqual(merged.notes.find((n) => n.id === 'n-1').tags, ['a', 'b'], 'tags joined and sorted');
+  assert.deepEqual(merged.linked.map((l) => l.id), ['l-a', 'l-b', 'l-common'], 'linked de-duplicated, directs dropped, sorted by path');
+  assert.equal(merged.linkedOmitted, 3, 'omitted summed when nothing is cut');
+  const chain = chainOf(epic, beads, PROJECT_A, FIXTURE, SETTINGS, merged);
+  assert.equal(chain.notes.state, 'available', 'merged answer resolves to available notes');
+  assert.deepEqual(chain.notes.linked.map((l) => l.id), ['l-a', 'l-b', 'l-common'], 'merged linked survives resolveChain');
+}
+
+// Two batches that together link 25 distinct notes: the merge keeps the first 20 by path
+// and counts the 5 it cut on top of what each batch had already omitted.
+{
+  const linkedNote = (n) => ({ id: `l-${n}`, title: `L${n}`, path: `l/${String(n).padStart(2, '0')}.md`, kind: 'nota', tags: [] });
+  const batchA = { notes: [], linked: Array.from({ length: 13 }, (_, i) => linkedNote(i)), linkedOmitted: 1 };
+  const batchB = { notes: [], linked: Array.from({ length: 12 }, (_, i) => linkedNote(i + 13)), linkedOmitted: 2 };
+  const merged = mergeNotesAnswers([batchA, batchB]);
+  assert.equal(merged.linked.length, 20, 'linked cut to 20 across batches');
+  assert.equal(merged.linked[19].id, 'l-19', 'the cut keeps the first 20 by path');
+  assert.equal(merged.linkedOmitted, 8, 'omitted is each batch’s omissions plus the 5 cut');
 }
 
 console.log('test-chain: ok');
