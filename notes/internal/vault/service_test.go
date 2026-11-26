@@ -197,6 +197,34 @@ func TestRouteDeleteOfAFileBackOnDiskKeepsTheNote(t *testing.T) {
 	}
 }
 
+// A folder's directory delete reaches OnDirDelete: renamed inside the vault,
+// its notes keep their ids through the changes at the new path; removed, they
+// are tombstoned when the window ends.
+func TestRouteDirDeleteFollowsTheFolder(t *testing.T) {
+	rs := newRoutedService(t)
+	kept := rs.write(t, "projects/kept.md", noteText("kept", "Kept"))
+	gone := rs.write(t, "scratch/gone.md", noteText("gone", "Gone"))
+	rs.route(watcher.KindChange, kept)
+	rs.route(watcher.KindChange, gone)
+
+	move(t, filepath.Join(rs.root, "projects"), filepath.Join(rs.root, "renamed"))
+	if err := os.RemoveAll(filepath.Join(rs.root, "scratch")); err != nil {
+		t.Fatal(err)
+	}
+	rs.route(watcher.KindDirDelete, filepath.Join(rs.root, "projects"))
+	rs.route(watcher.KindDirDelete, filepath.Join(rs.root, "scratch"))
+	rs.route(watcher.KindChange, filepath.Join(rs.root, "renamed", "kept.md"))
+	rs.endWindow(t)
+
+	if !liveNote(t, rs.g, "kept") || cachedPath(t, rs.g, "kept") != filepath.Join("renamed", "kept.md") {
+		t.Errorf("the renamed folder's note: live=%v at %q, want live at renamed/kept.md",
+			liveNote(t, rs.g, "kept"), cachedPath(t, rs.g, "kept"))
+	}
+	if liveNote(t, rs.g, "gone") {
+		t.Error("the removed folder's note is still live after the window")
+	}
+}
+
 // fakeSource stands in for the watcher: the test pushes events into it and
 // sets its dropped flag by hand.
 type fakeSource struct {
