@@ -146,6 +146,40 @@ func resolveInTx(ctx context.Context, tx *graph.WriteTx, srcNodeID, body string)
 	return outcomes, nil
 }
 
+// The four lookups of resolveTargetInTx. Each expression matches an index of
+// migration 0011 character for character, which is what lets SQLite use it;
+// resolver_plan_test.go runs these same strings through EXPLAIN QUERY PLAN.
+// The path lookups join with CROSS JOIN, which keeps note_paths the outer
+// loop: with a plain JOIN the planner starts at nodes through idx_nodes_type,
+// whose type = 'note' matches every note, and never reaches the path index.
+const (
+	lookupByIDQuery = `SELECT id FROM nodes WHERE LOWER(id) = ? AND deleted_at IS NULL ORDER BY id ASC LIMIT 1`
+
+	lookupByPathQuery = `SELECT np.uuid
+		 FROM note_paths np
+		 CROSS JOIN nodes n ON n.id = np.uuid
+		 WHERE n.type = 'note' AND n.deleted_at IS NULL
+		   AND (LOWER(REPLACE(np.path, '\', '/')) = ? OR LOWER(REPLACE(np.path, '\', '/')) = ?)
+		 ORDER BY LENGTH(np.path) ASC, LOWER(np.path) ASC, np.path ASC, np.uuid ASC
+		 LIMIT 1`
+
+	// A path can end in /<target>.md only when its basename is the target, so
+	// base_key narrows the candidates through its index and the suffix check
+	// keeps the answer what it was. A row with no key yet stays a candidate:
+	// rows written before migration 0011, until a cold start fills them, and
+	// rows inserted without the reconciler would otherwise drop out of step 3.
+	lookupByBaseKeyQuery = `SELECT np.uuid
+		 FROM note_paths np
+		 CROSS JOIN nodes n ON n.id = np.uuid
+		 WHERE n.type = 'note' AND n.deleted_at IS NULL
+		   AND (np.base_key = ? OR np.base_key IS NULL)
+		   AND SUBSTR(LOWER(REPLACE(np.path, '\', '/')), -LENGTH(?)) = ?
+		 ORDER BY LENGTH(np.path) ASC, LOWER(np.path) ASC, np.path ASC, np.uuid ASC
+		 LIMIT 1`
+
+	lookupByTitleQuery = `SELECT id FROM nodes WHERE type = 'note' AND LOWER(title) = ? AND deleted_at IS NULL ORDER BY id ASC LIMIT 1`
+)
+
 // resolveTargetInTx looks up a normalized target in Obsidian order, without
 // regard to case:
 //  1. Live node ID of any type (keeps UUID links to non-note nodes working,
@@ -157,10 +191,7 @@ func resolveTargetInTx(tx *graph.WriteTx, norm string) (dstNodeID, resolvedBy st
 	var foundID string
 
 	// 1. Live node ID of any type.
-	err = tx.QueryRow(
-		`SELECT id FROM nodes WHERE LOWER(id) = ? AND deleted_at IS NULL ORDER BY id ASC LIMIT 1`,
-		norm,
-	).Scan(&foundID)
+	err = tx.QueryRow(lookupByIDQuery, norm).Scan(&foundID)
 	if err == nil {
 		return foundID, "uuid", nil
 	}
@@ -170,16 +201,7 @@ func resolveTargetInTx(tx *graph.WriteTx, norm string) (dstNodeID, resolvedBy st
 
 	// 2. Exact relative path of a live note, with or without .md.
 	withExt := norm + ".md"
-	err = tx.QueryRow(
-		`SELECT np.uuid
-		 FROM note_paths np
-		 JOIN nodes n ON n.id = np.uuid
-		 WHERE n.type = 'note' AND n.deleted_at IS NULL
-		   AND (LOWER(REPLACE(np.path, '\', '/')) = ? OR LOWER(REPLACE(np.path, '\', '/')) = ?)
-		 ORDER BY LENGTH(np.path) ASC, LOWER(np.path) ASC, np.path ASC, np.uuid ASC
-		 LIMIT 1`,
-		withExt, norm,
-	).Scan(&foundID)
+	err = tx.QueryRow(lookupByPathQuery, withExt, norm).Scan(&foundID)
 	if err == nil {
 		return foundID, "stem", nil
 	}
@@ -188,18 +210,10 @@ func resolveTargetInTx(tx *graph.WriteTx, norm string) (dstNodeID, resolvedBy st
 	}
 
 	// 3. Bare filename anywhere in the vault: shortest path wins, ties alphabetically.
+	// norm holds no "/" here, so it is its own last segment and the base key.
 	if !strings.Contains(norm, "/") {
 		suffix := "/" + norm + ".md"
-		err = tx.QueryRow(
-			`SELECT np.uuid
-			 FROM note_paths np
-			 JOIN nodes n ON n.id = np.uuid
-			 WHERE n.type = 'note' AND n.deleted_at IS NULL
-			   AND SUBSTR(LOWER(REPLACE(np.path, '\', '/')), -LENGTH(?)) = ?
-			 ORDER BY LENGTH(np.path) ASC, LOWER(np.path) ASC, np.path ASC, np.uuid ASC
-			 LIMIT 1`,
-			suffix, suffix,
-		).Scan(&foundID)
+		err = tx.QueryRow(lookupByBaseKeyQuery, norm, suffix, suffix).Scan(&foundID)
 		if err == nil {
 			return foundID, "stem", nil
 		}
@@ -209,10 +223,7 @@ func resolveTargetInTx(tx *graph.WriteTx, norm string) (dstNodeID, resolvedBy st
 	}
 
 	// 4. Live note title, ties broken by id ASC.
-	err = tx.QueryRow(
-		`SELECT id FROM nodes WHERE type = 'note' AND LOWER(title) = ? AND deleted_at IS NULL ORDER BY id ASC LIMIT 1`,
-		norm,
-	).Scan(&foundID)
+	err = tx.QueryRow(lookupByTitleQuery, norm).Scan(&foundID)
 	if err == nil {
 		return foundID, "title", nil
 	}

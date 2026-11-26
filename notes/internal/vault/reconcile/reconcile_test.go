@@ -3,6 +3,7 @@ package reconcile_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/gabrielassisxyz/houston/notes/internal/graph/testutil"
 	"github.com/gabrielassisxyz/houston/notes/internal/vault/frontmatter"
 	"github.com/gabrielassisxyz/houston/notes/internal/vault/reconcile"
+	"github.com/gabrielassisxyz/houston/notes/internal/vault/wikilink"
 )
 
 // TestUpsertAndLookup verifies basic insert and both lookup directions.
@@ -1592,5 +1594,107 @@ func TestColdStartFillsMissingBaseKeys(t *testing.T) {
 	}
 	if resolvedBy != "stem" {
 		t.Errorf("Source links to Target by %q, want stem", resolvedBy)
+	}
+}
+
+// unindexedLookups are the resolver's four queries as they stood before
+// migration 0011, in resolution order with the arguments each one took.
+var unindexedLookups = []struct {
+	query string
+	args  func(norm string) []any
+	bare  bool // runs only for a target with no "/"
+}{
+	{`SELECT id FROM nodes WHERE LOWER(id) = ? AND deleted_at IS NULL ORDER BY id ASC LIMIT 1`,
+		func(norm string) []any { return []any{norm} }, false},
+	{`SELECT np.uuid FROM note_paths np JOIN nodes n ON n.id = np.uuid
+	  WHERE n.type = 'note' AND n.deleted_at IS NULL
+	    AND (LOWER(REPLACE(np.path, '\', '/')) = ? OR LOWER(REPLACE(np.path, '\', '/')) = ?)
+	  ORDER BY LENGTH(np.path) ASC, LOWER(np.path) ASC, np.path ASC, np.uuid ASC LIMIT 1`,
+		func(norm string) []any { return []any{norm + ".md", norm} }, false},
+	{`SELECT np.uuid FROM note_paths np JOIN nodes n ON n.id = np.uuid
+	  WHERE n.type = 'note' AND n.deleted_at IS NULL
+	    AND SUBSTR(LOWER(REPLACE(np.path, '\', '/')), -LENGTH(?)) = ?
+	  ORDER BY LENGTH(np.path) ASC, LOWER(np.path) ASC, np.path ASC, np.uuid ASC LIMIT 1`,
+		func(norm string) []any { return []any{"/" + norm + ".md", "/" + norm + ".md"} }, true},
+	{`SELECT id FROM nodes WHERE type = 'note' AND LOWER(title) = ? AND deleted_at IS NULL ORDER BY id ASC LIMIT 1`,
+		func(norm string) []any { return []any{norm} }, false},
+}
+
+// resolveUnindexed answers what the resolver answered before migration 0011.
+func resolveUnindexed(t *testing.T, g *graph.Graph, norm string) string {
+	t.Helper()
+	var found string
+	if err := g.DoRead(context.Background(), func(tx *graph.ReadTx) error {
+		for _, l := range unindexedLookups {
+			if l.bare && strings.Contains(norm, "/") {
+				continue
+			}
+			err := tx.QueryRow(l.query, l.args(norm)...).Scan(&found)
+			if err != sql.ErrNoRows {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("unindexed lookup of %q: %v", norm, err)
+	}
+	return found
+}
+
+// The indexes change how each link is found, never what it resolves to: over
+// paths written by the reconciler, with mixed case, backslashes, a double
+// extension and letters SQLite's LOWER leaves alone, every link resolves to
+// the note the unindexed queries pick.
+func TestIndexedResolverAgreesWithUnindexedQueries(t *testing.T) {
+	g := testutil.NewInMemoryTestGraph(t)
+	ctx := context.Background()
+
+	paths := []string{
+		"plan.md", "Notes/Plan.MD", "a/b/Plan.md", `win\Only.md`, "archive/Only.md.md",
+		"Docs/Été.md", "docs/été.md", "releases/v1.2.md", "z/Shared.md", "alpha/beta/Shared.md",
+		"b/Tie.md", "a/Tie.md", "K/kelvinK.md", "deep/Straße.md", "upper/ONLY.md",
+	}
+	if err := g.DoWrite(ctx, func(tx *graph.WriteTx) error {
+		for i := range paths {
+			if _, err := nodes.CreateNote(ctx, tx, nodes.Note{
+				ID: fmt.Sprintf("note-%02d", i), Title: fmt.Sprintf("Title %02d", i),
+			}, nodes.Author{Name: "test"}); err != nil {
+				return err
+			}
+		}
+		_, err := nodes.CreateNote(ctx, tx, nodes.Note{ID: "source", Title: "Source"}, nodes.Author{Name: "test"})
+		return err
+	}); err != nil {
+		t.Fatalf("seed notes: %v", err)
+	}
+	for i, p := range paths {
+		if err := reconcile.Upsert(ctx, g, fmt.Sprintf("note-%02d", i), p, fmt.Sprintf("h%02d", i)); err != nil {
+			t.Fatalf("Upsert %q: %v", p, err)
+		}
+	}
+
+	targets := []string{
+		"plan", "PLAN", "Plan.md", "notes/plan", `win\only`, "only", "Only.md", "été", "Été",
+		"v1.2", "shared", "tie", "kelvinK", "kelvink", "straße", "STRASSE", "title 03",
+		"note-04", "missing",
+	}
+	var r wikilink.Resolver
+	for _, target := range targets {
+		want := resolveUnindexed(t, g, wikilink.NormalizeTarget(target))
+		outcomes, err := r.Resolve(ctx, g, "source", "[["+target+"]]")
+		if err != nil {
+			t.Fatalf("Resolve [[%s]]: %v", target, err)
+		}
+		got := ""
+		if len(outcomes) == 1 && outcomes[0].Resolved {
+			if err := g.DoRead(ctx, func(tx *graph.ReadTx) error {
+				return tx.QueryRow(`SELECT dst FROM edges WHERE id = ?`, outcomes[0].EdgeID).Scan(&got)
+			}); err != nil {
+				t.Fatalf("read the edge of [[%s]]: %v", target, err)
+			}
+		}
+		if got != want {
+			t.Errorf("[[%s]] resolves to %q, the unindexed queries to %q", target, got, want)
+		}
 	}
 }
