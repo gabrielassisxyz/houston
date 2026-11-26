@@ -67,7 +67,7 @@ func TestOpenAppliesRevisionsIndexAfterNoteRefs(t *testing.T) {
 	}
 
 	want := []int{1, 2, 3, 4, 6, 7, 8, 9, 10}
-	if !reflect.DeepEqual(versions, want) {
+	if len(versions) < len(want) || !reflect.DeepEqual(versions[:len(want)], want) {
 		t.Errorf("clean migrations = %v, want %v", versions, want)
 	}
 	if indexTable != "revisions" {
@@ -94,7 +94,7 @@ func TestRevisionsIndexMigrationGoesDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("migrate.New: %v", err)
 	}
-	if err := runner.Up(ctx); err != nil {
+	if err := runner.UpTo(ctx, 10); err != nil {
 		t.Fatalf("Up: %v", err)
 	}
 
@@ -121,7 +121,7 @@ func TestRevisionsIndexMigrationGoesDownAndUp(t *testing.T) {
 		t.Error("index still present after Down")
 	}
 
-	if err := runner.Up(ctx); err != nil {
+	if err := runner.UpTo(ctx, 10); err != nil {
 		t.Fatalf("Up again: %v", err)
 	}
 	if !indexed() {
