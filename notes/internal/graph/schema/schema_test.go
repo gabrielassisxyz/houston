@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/gabrielassisxyz/houston/notes/internal/graph"
 	"github.com/gabrielassisxyz/houston/notes/internal/graph/internal/migrate"
 	"github.com/gabrielassisxyz/houston/notes/internal/graph/internal/sqlite"
 	"github.com/gabrielassisxyz/houston/notes/internal/graph/schema"
@@ -488,6 +490,116 @@ func TestMigration006VaultPinsRoundTrip(t *testing.T) {
 	for _, table := range []string{"note_paths", "tags"} {
 		if hasColumn(t, db, table, "pinned") {
 			t.Errorf("%s.pinned should be gone after down", table)
+		}
+	}
+}
+
+// resolverKeyIndexes are the indexes migration 0011 adds for the wikilink
+// resolver's four lookups.
+var resolverKeyIndexes = map[string]string{
+	"idx_nodes_lower_id":      "nodes",
+	"idx_nodes_lower_title":   "nodes",
+	"idx_note_paths_path_key": "note_paths",
+	"idx_note_paths_base_key": "note_paths",
+}
+
+// resolverKeysState reports whether note_paths has base_key and, for each
+// index of 0011, the table it is on ("" when it does not exist).
+func resolverKeysState(t *testing.T, g *graph.Graph) (hasBaseKey bool, indexTables map[string]string) {
+	t.Helper()
+	indexTables = make(map[string]string, len(resolverKeyIndexes))
+	err := g.DoRead(context.Background(), func(tx *graph.ReadTx) error {
+		var n int
+		if err := tx.QueryRow(
+			`SELECT COUNT(*) FROM pragma_table_info('note_paths') WHERE name = 'base_key'`,
+		).Scan(&n); err != nil {
+			return err
+		}
+		hasBaseKey = n == 1
+		for name := range resolverKeyIndexes {
+			var table string
+			err := tx.QueryRow(
+				`SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = ?`, name,
+			).Scan(&table)
+			if err != nil && err != sql.ErrNoRows {
+				return err
+			}
+			indexTables[name] = table
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("reading the schema: %v", err)
+	}
+	return hasBaseKey, indexTables
+}
+
+// graph.Open applies 0011 right after 0010, and 0011's down file takes the
+// column and its four indexes away again, which is the whole of its undo.
+func TestMigration0011ResolverKeysOpenAndDown(t *testing.T) {
+	ctx := context.Background()
+	g, err := graph.Open(ctx, graph.Config{Path: filepath.Join(t.TempDir(), "graph.db")})
+	if err != nil {
+		t.Fatalf("graph.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = g.Close() })
+
+	var versions []int
+	if err := g.DoRead(ctx, func(tx *graph.ReadTx) error {
+		rows, err := tx.Query(`SELECT version FROM schema_migrations WHERE dirty = 0 ORDER BY version`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var v int
+			if err := rows.Scan(&v); err != nil {
+				return err
+			}
+			versions = append(versions, v)
+		}
+		return rows.Err()
+	}); err != nil {
+		t.Fatalf("reading schema_migrations: %v", err)
+	}
+	after10 := false
+	for i := 1; i < len(versions); i++ {
+		if versions[i-1] == 10 && versions[i] == 11 {
+			after10 = true
+		}
+	}
+	if !after10 {
+		t.Errorf("clean migrations = %v, want 11 applied right after 10", versions)
+	}
+
+	hasBaseKey, indexTables := resolverKeysState(t, g)
+	if !hasBaseKey {
+		t.Error("note_paths.base_key missing after graph.Open")
+	}
+	for name, want := range resolverKeyIndexes {
+		if indexTables[name] != want {
+			t.Errorf("index %s is on %q after graph.Open, want %s", name, indexTables[name], want)
+		}
+	}
+
+	down, err := schema.FS.ReadFile("0011_resolver_keys.down.sql")
+	if err != nil {
+		t.Fatalf("read the down file: %v", err)
+	}
+	if err := g.DoWrite(ctx, func(tx *graph.WriteTx) error {
+		_, err := tx.Exec(string(down))
+		return err
+	}); err != nil {
+		t.Fatalf("run the down file: %v", err)
+	}
+
+	hasBaseKey, indexTables = resolverKeysState(t, g)
+	if hasBaseKey {
+		t.Error("note_paths.base_key still present after the down file")
+	}
+	for name := range resolverKeyIndexes {
+		if indexTables[name] != "" {
+			t.Errorf("index %s still present after the down file", name)
 		}
 	}
 }
