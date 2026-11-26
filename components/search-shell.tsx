@@ -7,6 +7,7 @@ import type { Bead } from "@/lib/schema";
 import { useCapabilities } from "@/hooks/use-capabilities";
 import { useUrlState } from "@/hooks/use-url-state";
 import { SEARCH_PAGE_ID } from "@/lib/aggregate";
+import { obsidianLink } from "@/lib/obsidian-link";
 
 const SEARCH_LIMIT = 20;
 const DEBOUNCE_MS = 350;
@@ -151,6 +152,7 @@ export function SearchShell() {
 
   const trimmedQ = qParam.trim();
   const notesOn = caps.data?.notes === true;
+  const vault = caps.data?.obsidianVault ?? null;
   const offsetNum = offsetParam === "" ? 0 : Number(offsetParam);
 
   const search = useQuery({
@@ -290,7 +292,9 @@ export function SearchShell() {
             {`Mostrando ${from}–${to} de ${answer.total}`}
           </p>
           <ul className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto">
-            {answer.hits.map((hit) => (
+            {answer.hits.map((hit) => {
+              const href = obsidianLink(vault, hit.path);
+              return (
               <li
                 key={hit.id}
                 data-testid="search-hit"
@@ -299,7 +303,7 @@ export function SearchShell() {
               >
                 <div className="truncate text-[13.5px] font-[600]">{hit.title}</div>
                 <div className="truncate font-mono text-[11.5px] text-[var(--text-3)]">
-                  {hit.path}
+                  {href ? <a href={href}>{hit.path}</a> : hit.path}
                 </div>
                 <div className="mt-1 flex flex-wrap gap-2 text-[11.5px] text-[var(--text-3)]">
                   <span>{hit.kind}</span>
@@ -311,7 +315,8 @@ export function SearchShell() {
                   <Snippet text={hit.snippet} />
                 </p>
               </li>
-            ))}
+              );
+            })}
           </ul>
           <div className="flex items-center gap-2 py-3">
             <button

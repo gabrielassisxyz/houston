@@ -2,6 +2,7 @@
 import * as React from "react";
 import { useChain } from "@/hooks/use-chain";
 import { useCapabilities } from "@/hooks/use-capabilities";
+import { obsidianLink } from "@/lib/obsidian-link";
 import type {
   Chain,
   ChainApproval,
@@ -330,13 +331,22 @@ function isEmptyChain(chain: Chain): boolean {
   return !hasTracker && !hasEpic && !hasDescendants && !hasPipeline && !hasNotesContent(chain.notes);
 }
 
-function NoteRow({ note, linked }: { note: ChainDirectNote | ChainLinkedNote; linked?: boolean }) {
+function NoteRow({
+  note,
+  linked,
+  vault,
+}: {
+  note: ChainDirectNote | ChainLinkedNote;
+  linked?: boolean;
+  vault: string | null;
+}) {
   const attr = linked ? { "data-notes-linked": note.id } : { "data-notes-note": note.id };
+  const href = obsidianLink(vault, note.path);
   return (
     <div {...attr}>
       <span>{note.title}</span>
       {" · "}
-      <span>{note.path}</span>
+      {href ? <a href={href}>{note.path}</a> : <span>{note.path}</span>}
     </div>
   );
 }
@@ -345,23 +355,25 @@ function NotesGroup({
   title,
   kind,
   notes,
+  vault,
 }: {
   title: string;
   kind: string;
   notes: (ChainDirectNote | ChainLinkedNote)[];
+  vault: string | null;
 }) {
   if (notes.length === 0) return null;
   return (
     <div data-notes-kind={kind}>
       <span>{title}</span>
       {notes.map((note) => (
-        <NoteRow key={note.id} note={note} linked={kind === "linked"} />
+        <NoteRow key={note.id} note={note} linked={kind === "linked"} vault={vault} />
       ))}
     </div>
   );
 }
 
-function NotesBlock({ notes }: { notes: ChainNotes }) {
+function NotesBlock({ notes, vault }: { notes: ChainNotes; vault: string | null }) {
   if (notes.state === "unavailable") {
     return (
       <div data-notes-unavailable>
@@ -373,11 +385,11 @@ function NotesBlock({ notes }: { notes: ChainNotes }) {
   }
   return (
     <div data-notes-available>
-      <NotesGroup title="Planejamento" kind="plano" notes={notes.plano} />
-      <NotesGroup title="Implementação" kind="implementacao" notes={notes.implementacao} />
-      <NotesGroup title="Evidências" kind="evidencia" notes={notes.evidencia} />
-      <NotesGroup title="Notas" kind="nota" notes={notes.nota} />
-      <NotesGroup title="Notas ligadas" kind="linked" notes={notes.linked} />
+      <NotesGroup title="Planejamento" kind="plano" notes={notes.plano} vault={vault} />
+      <NotesGroup title="Implementação" kind="implementacao" notes={notes.implementacao} vault={vault} />
+      <NotesGroup title="Evidências" kind="evidencia" notes={notes.evidencia} vault={vault} />
+      <NotesGroup title="Notas" kind="nota" notes={notes.nota} vault={vault} />
+      <NotesGroup title="Notas ligadas" kind="linked" notes={notes.linked} vault={vault} />
       {notes.linkedOmitted > 0 && (
         <div data-notes-omitted>
           <span>{`e mais ${notes.linkedOmitted} notas ligadas`}</span>
@@ -402,6 +414,9 @@ export function ChainSection({
   // notes part is shown, without the tracker and pipeline items. While the
   // capabilities read is pending the full chain is shown, as before.
   const chainEnabled = caps.data ? caps.data.chain === true : true;
+  // The vault name comes from capabilities, never from the config file
+  // directly: without it the path is shown as plain text.
+  const vault = caps.data?.obsidianVault ?? null;
   const empty = query.data
     ? chainEnabled
       ? isEmptyChain(query.data)
@@ -430,7 +445,7 @@ export function ChainSection({
             Array.isArray(query.data.descendants) &&
             query.data.descendants.map((d) => <DescendantRow key={d.id} descendant={d} />)}
           {chainEnabled && query.data.pipeline && <PipelineBlock pipeline={query.data.pipeline} />}
-          {query.data.notes && <NotesBlock notes={query.data.notes} />}
+          {query.data.notes && <NotesBlock notes={query.data.notes} vault={vault} />}
         </>
       )}
     </div>
