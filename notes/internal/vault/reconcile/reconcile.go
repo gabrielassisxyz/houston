@@ -100,19 +100,29 @@ func Upsert(ctx context.Context, g *graph.Graph, uuid, path, contentHash string)
 // Exposed so U7/U11 can batch multiple cache ops inside a single transaction.
 func upsertInTx(tx *graph.WriteTx, uuid, path, contentHash string) error {
 	_, err := tx.Exec(
-		`INSERT INTO note_paths (uuid, path, content_hash, updated_at)
-		 VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+		`INSERT INTO note_paths (uuid, path, content_hash, base_key, updated_at)
+		 VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 		 ON CONFLICT(uuid) DO UPDATE SET
 		     path         = excluded.path,
 		     content_hash = excluded.content_hash,
+		     base_key     = excluded.base_key,
 		     updated_at   = excluded.updated_at
 		 WHERE path != excluded.path OR content_hash IS NOT excluded.content_hash`,
-		uuid, path, contentHash,
+		uuid, path, contentHash, baseKey(path),
 	)
 	if err != nil {
 		return fmt.Errorf("reconcile: upsert uuid=%q path=%q: %w", uuid, path, err)
 	}
 	return nil
+}
+
+// baseKey is the note_paths.base_key of a path: its basename, lower-cased, with
+// one trailing .md removed without regard to case. The wikilink resolver's
+// bare-filename step looks a normalized link target up by it, so it follows
+// the same rules as wikilink.NormalizeTarget.
+func baseKey(path string) string {
+	s := strings.ToLower(strings.ReplaceAll(path, "\\", "/"))
+	return vaultfile.TrimNoteExt(s[strings.LastIndex(s, "/")+1:])
 }
 
 // Forget removes the note_paths row whose path equals the given value.

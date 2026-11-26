@@ -2,6 +2,8 @@ package reconcile_test
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"github.com/gabrielassisxyz/houston/notes/internal/graph/testutil"
 	"github.com/gabrielassisxyz/houston/notes/internal/vault/frontmatter"
 	"github.com/gabrielassisxyz/houston/notes/internal/vault/reconcile"
+	"github.com/gabrielassisxyz/houston/notes/internal/vault/wikilink"
 )
 
 // TestUpsertAndLookup verifies basic insert and both lookup directions.
@@ -1496,5 +1499,202 @@ func TestHouOc517NoteFromFileFillsKindAndRefs(t *testing.T) {
 	}
 	if len(got.Refs) != 1 || got.Refs[0] != "hou-4kz" {
 		t.Errorf("Refs = %v, want [hou-4kz]", got.Refs)
+	}
+}
+
+// readBaseKey returns the note_paths.base_key of a note, invalid when NULL.
+func readBaseKey(t *testing.T, g *graph.Graph, uuid string) sql.NullString {
+	t.Helper()
+	var key sql.NullString
+	if err := g.DoRead(context.Background(), func(tx *graph.ReadTx) error {
+		return tx.QueryRow(`SELECT base_key FROM note_paths WHERE uuid = ?`, uuid).Scan(&key)
+	}); err != nil {
+		t.Fatalf("read base_key of %q: %v", uuid, err)
+	}
+	return key
+}
+
+// The resolver's bare-filename step finds a note only through its base_key,
+// so every path upsertInTx writes carries one: on insert, lower-cased and
+// without the extension whatever its case, and again on a move.
+func TestUpsertWritesBaseKeyOnInsertAndMove(t *testing.T) {
+	g := testutil.NewInMemoryTestGraph(t)
+	ctx := context.Background()
+
+	if err := reconcile.Upsert(ctx, g, "note-plan", "Notes/Plan.MD", "h1"); err != nil {
+		t.Fatalf("Upsert insert: %v", err)
+	}
+	if got := readBaseKey(t, g, "note-plan"); !got.Valid || got.String != "plan" {
+		t.Errorf("base_key of Notes/Plan.MD = %+v, want plan", got)
+	}
+
+	if err := reconcile.Upsert(ctx, g, "note-moved", "a/plan.md", "h2"); err != nil {
+		t.Fatalf("Upsert before move: %v", err)
+	}
+	if err := reconcile.Upsert(ctx, g, "note-moved", "b/roadmap.md", "h2"); err != nil {
+		t.Fatalf("Upsert move: %v", err)
+	}
+	if got := readBaseKey(t, g, "note-moved"); !got.Valid || got.String != "roadmap" {
+		t.Errorf("base_key after a move to b/roadmap.md = %+v, want roadmap", got)
+	}
+}
+
+// A database written before migration 0011 has note_paths rows with no
+// base_key, and an unchanged note never reaches upsertInTx again. ColdStart
+// keys those rows before it walks the vault, and a link to such a note's
+// basename still resolves through the bare-filename step.
+func TestColdStartFillsMissingBaseKeys(t *testing.T) {
+	g := testutil.NewInMemoryTestGraph(t)
+	ctx := context.Background()
+	vault := newVaultDir(t)
+
+	targetRaw := "---\nid: node-target\ntitle: Quarterly Notes\n---\n\nBody.\n"
+	writeFile(t, filepath.Join(vault, "sub", "Target.md"), targetRaw)
+	writeFile(t, filepath.Join(vault, "Source.md"),
+		"---\nid: node-source\ntitle: Source\n---\n\nSee [[Target]].\n")
+
+	// The target as an earlier run left it: indexed, unchanged on disk, and
+	// with a path row that has no base_key.
+	if err := g.DoWrite(ctx, func(tx *graph.WriteTx) error {
+		if _, err := nodes.CreateNote(ctx, tx, nodes.Note{
+			ID: "node-target", Title: "Quarterly Notes", Body: "Body.\n",
+		}, nodes.Author{Name: "test"}); err != nil {
+			return err
+		}
+		_, err := tx.Exec(
+			`INSERT INTO note_paths (uuid, path, content_hash) VALUES (?, ?, ?)`,
+			"node-target", "sub/Target.md", reconcile.HashBytes([]byte(targetRaw)),
+		)
+		return err
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if got := readBaseKey(t, g, "node-target"); got.Valid {
+		t.Fatalf("seeded base_key = %q, want NULL", got.String)
+	}
+
+	if err := reconcile.New(g, vault).ColdStart(ctx); err != nil {
+		t.Fatalf("ColdStart: %v", err)
+	}
+
+	if got := readBaseKey(t, g, "node-target"); !got.Valid || got.String != "target" {
+		t.Errorf("base_key after ColdStart = %+v, want target", got)
+	}
+
+	// Neither the id nor the exact path nor the title is "target", so only
+	// the bare-filename step can have made this edge.
+	var resolvedBy string
+	if err := g.DoRead(ctx, func(tx *graph.ReadTx) error {
+		return tx.QueryRow(
+			`SELECT json_extract(attrs, '$.resolved_by') FROM edges
+			 WHERE src = 'node-source' AND dst = 'node-target' AND label = 'links_to'`,
+		).Scan(&resolvedBy)
+	}); err != nil {
+		t.Fatalf("read the edge from Source to Target: %v", err)
+	}
+	if resolvedBy != "stem" {
+		t.Errorf("Source links to Target by %q, want stem", resolvedBy)
+	}
+}
+
+// unindexedLookups are the resolver's four queries as they stood before
+// migration 0011, in resolution order with the arguments each one took.
+var unindexedLookups = []struct {
+	query string
+	args  func(norm string) []any
+	bare  bool // runs only for a target with no "/"
+}{
+	{`SELECT id FROM nodes WHERE LOWER(id) = ? AND deleted_at IS NULL ORDER BY id ASC LIMIT 1`,
+		func(norm string) []any { return []any{norm} }, false},
+	{`SELECT np.uuid FROM note_paths np JOIN nodes n ON n.id = np.uuid
+	  WHERE n.type = 'note' AND n.deleted_at IS NULL
+	    AND (LOWER(REPLACE(np.path, '\', '/')) = ? OR LOWER(REPLACE(np.path, '\', '/')) = ?)
+	  ORDER BY LENGTH(np.path) ASC, LOWER(np.path) ASC, np.path ASC, np.uuid ASC LIMIT 1`,
+		func(norm string) []any { return []any{norm + ".md", norm} }, false},
+	{`SELECT np.uuid FROM note_paths np JOIN nodes n ON n.id = np.uuid
+	  WHERE n.type = 'note' AND n.deleted_at IS NULL
+	    AND SUBSTR(LOWER(REPLACE(np.path, '\', '/')), -LENGTH(?)) = ?
+	  ORDER BY LENGTH(np.path) ASC, LOWER(np.path) ASC, np.path ASC, np.uuid ASC LIMIT 1`,
+		func(norm string) []any { return []any{"/" + norm + ".md", "/" + norm + ".md"} }, true},
+	{`SELECT id FROM nodes WHERE type = 'note' AND LOWER(title) = ? AND deleted_at IS NULL ORDER BY id ASC LIMIT 1`,
+		func(norm string) []any { return []any{norm} }, false},
+}
+
+// resolveUnindexed answers what the resolver answered before migration 0011.
+func resolveUnindexed(t *testing.T, g *graph.Graph, norm string) string {
+	t.Helper()
+	var found string
+	if err := g.DoRead(context.Background(), func(tx *graph.ReadTx) error {
+		for _, l := range unindexedLookups {
+			if l.bare && strings.Contains(norm, "/") {
+				continue
+			}
+			err := tx.QueryRow(l.query, l.args(norm)...).Scan(&found)
+			if err != sql.ErrNoRows {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("unindexed lookup of %q: %v", norm, err)
+	}
+	return found
+}
+
+// The indexes change how each link is found, never what it resolves to: over
+// paths written by the reconciler, with mixed case, backslashes, a double
+// extension and letters SQLite's LOWER leaves alone, every link resolves to
+// the note the unindexed queries pick.
+func TestIndexedResolverAgreesWithUnindexedQueries(t *testing.T) {
+	g := testutil.NewInMemoryTestGraph(t)
+	ctx := context.Background()
+
+	paths := []string{
+		"plan.md", "Notes/Plan.MD", "a/b/Plan.md", `win\Only.md`, "archive/Only.md.md",
+		"Docs/Été.md", "docs/été.md", "releases/v1.2.md", "z/Shared.md", "alpha/beta/Shared.md",
+		"b/Tie.md", "a/Tie.md", "K/kelvinK.md", "deep/Straße.md", "upper/ONLY.md",
+	}
+	if err := g.DoWrite(ctx, func(tx *graph.WriteTx) error {
+		for i := range paths {
+			if _, err := nodes.CreateNote(ctx, tx, nodes.Note{
+				ID: fmt.Sprintf("note-%02d", i), Title: fmt.Sprintf("Title %02d", i),
+			}, nodes.Author{Name: "test"}); err != nil {
+				return err
+			}
+		}
+		_, err := nodes.CreateNote(ctx, tx, nodes.Note{ID: "source", Title: "Source"}, nodes.Author{Name: "test"})
+		return err
+	}); err != nil {
+		t.Fatalf("seed notes: %v", err)
+	}
+	for i, p := range paths {
+		if err := reconcile.Upsert(ctx, g, fmt.Sprintf("note-%02d", i), p, fmt.Sprintf("h%02d", i)); err != nil {
+			t.Fatalf("Upsert %q: %v", p, err)
+		}
+	}
+
+	targets := []string{
+		"plan", "PLAN", "Plan.md", "notes/plan", `win\only`, "only", "Only.md", "été", "Été",
+		"v1.2", "shared", "tie", "kelvinK", "kelvink", "straße", "STRASSE", "title 03",
+		"note-04", "missing",
+	}
+	var r wikilink.Resolver
+	for _, target := range targets {
+		want := resolveUnindexed(t, g, wikilink.NormalizeTarget(target))
+		outcomes, err := r.Resolve(ctx, g, "source", "[["+target+"]]")
+		if err != nil {
+			t.Fatalf("Resolve [[%s]]: %v", target, err)
+		}
+		got := ""
+		if len(outcomes) == 1 && outcomes[0].Resolved {
+			if err := g.DoRead(ctx, func(tx *graph.ReadTx) error {
+				return tx.QueryRow(`SELECT dst FROM edges WHERE id = ?`, outcomes[0].EdgeID).Scan(&got)
+			}); err != nil {
+				t.Fatalf("read the edge of [[%s]]: %v", target, err)
+			}
+		}
+		if got != want {
+			t.Errorf("[[%s]] resolves to %q, the unindexed queries to %q", target, got, want)
+		}
 	}
 }
