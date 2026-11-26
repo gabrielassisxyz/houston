@@ -2,6 +2,7 @@ package wikilink
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -68,51 +69,26 @@ func resolveInTx(ctx context.Context, tx *graph.WriteTx, srcNodeID, body string)
 	}
 
 	outcomes := make([]ResolveOutcome, 0, len(links))
+	seenDst := make(map[string]struct{}, len(links))
+	seenDangling := make(map[string]struct{}, len(links))
 
 	for _, link := range links {
-		kind := ClassifyTarget(link.Target)
+		norm := NormalizeTarget(link.Target)
+		if norm == "" {
+			continue
+		}
 
-		var dstNodeID string
-		var resolvedBy string
-
-		switch kind {
-		case KindUUID:
-			dstNodeID = link.Target
-			resolvedBy = "uuid"
-		case KindStem:
-			// Look up by stem in note_paths
-			var foundID string
-			err := tx.QueryRow(
-				`SELECT uuid FROM note_paths WHERE path = ? LIMIT 1`,
-				link.Target+".md",
-			).Scan(&foundID)
-			if err == nil {
-				dstNodeID = foundID
-				resolvedBy = "stem"
-			} else {
-				// Fall back to title lookup
-				err2 := tx.QueryRow(
-					`SELECT id FROM nodes WHERE type = 'note' AND title = ? AND deleted_at IS NULL ORDER BY id ASC LIMIT 1`,
-					link.Target,
-				).Scan(&foundID)
-				if err2 == nil {
-					dstNodeID = foundID
-					resolvedBy = "title"
-				}
-			}
-		case KindTitle:
-			var foundID string
-			err := tx.QueryRow(
-				`SELECT id FROM nodes WHERE type = 'note' AND title = ? AND deleted_at IS NULL ORDER BY id ASC LIMIT 1`,
-				link.Target,
-			).Scan(&foundID)
-			if err == nil {
-				dstNodeID = foundID
-				resolvedBy = "title"
-			}
+		dstNodeID, resolvedBy, err := resolveTargetInTx(tx, norm)
+		if err != nil {
+			return nil, err
 		}
 
 		if dstNodeID != "" && dstNodeID != srcNodeID {
+			if _, dup := seenDst[dstNodeID]; dup {
+				continue
+			}
+			seenDst[dstNodeID] = struct{}{}
+
 			// Resolved - create edge
 			attrsJSON := buildLinkAttrs(link.Target, resolvedBy, false)
 			edgeID, err := edges.Create(ctx, tx, edges.Edge{
@@ -131,6 +107,11 @@ func resolveInTx(ctx context.Context, tx *graph.WriteTx, srcNodeID, body string)
 				ResolvedBy: resolvedBy,
 			})
 		} else if dstNodeID == srcNodeID {
+			if _, dup := seenDst[dstNodeID]; dup {
+				continue
+			}
+			seenDst[dstNodeID] = struct{}{}
+
 			// Self-link - resolved but no edge created
 			outcomes = append(outcomes, ResolveOutcome{
 				Link:       link,
@@ -138,16 +119,21 @@ func resolveInTx(ctx context.Context, tx *graph.WriteTx, srcNodeID, body string)
 				ResolvedBy: resolvedBy,
 			})
 		} else {
-			// Unresolved - store as dangling
-			targetKind := string(kind)
+			if _, dup := seenDangling[norm]; dup {
+				continue
+			}
+			seenDangling[norm] = struct{}{}
+
+			// Unresolved - store as dangling under the normalized key
+			targetKind := string(ClassifyTarget(norm))
 			if targetKind == "" {
-				targetKind = "stem"
+				targetKind = string(KindStem)
 			}
 			u, _ := uuid.NewV7()
 			id := "dl-" + u.String()
 			if _, err := tx.Exec(
 				`INSERT INTO dangling_links (id, src_node_id, target_key, target_kind) VALUES (?, ?, ?, ?)`,
-				id, srcNodeID, link.Target, targetKind,
+				id, srcNodeID, norm, targetKind,
 			); err != nil {
 				return nil, fmt.Errorf("resolver: insert dangling: %w", err)
 			}
@@ -158,6 +144,83 @@ func resolveInTx(ctx context.Context, tx *graph.WriteTx, srcNodeID, body string)
 		}
 	}
 	return outcomes, nil
+}
+
+// resolveTargetInTx looks up a normalized target in Obsidian order, without
+// regard to case:
+//  1. Live node ID of any type (keeps UUID links to non-note nodes working,
+//     while a UUID-shaped target with no matching node falls through).
+//  2. Exact vault-relative path (with or without .md) of a live note.
+//  3. Bare filename anywhere in the vault (shortest path, then alphabetical).
+//  4. Live note title (ties broken by id ASC).
+func resolveTargetInTx(tx *graph.WriteTx, norm string) (dstNodeID, resolvedBy string, err error) {
+	var foundID string
+
+	// 1. Live node ID of any type.
+	err = tx.QueryRow(
+		`SELECT id FROM nodes WHERE LOWER(id) = ? AND deleted_at IS NULL ORDER BY id ASC LIMIT 1`,
+		norm,
+	).Scan(&foundID)
+	if err == nil {
+		return foundID, "uuid", nil
+	}
+	if err != sql.ErrNoRows {
+		return "", "", fmt.Errorf("resolver: lookup id %q: %w", norm, err)
+	}
+
+	// 2. Exact relative path of a live note, with or without .md.
+	withExt := norm + ".md"
+	err = tx.QueryRow(
+		`SELECT np.uuid
+		 FROM note_paths np
+		 JOIN nodes n ON n.id = np.uuid
+		 WHERE n.type = 'note' AND n.deleted_at IS NULL
+		   AND (LOWER(REPLACE(np.path, '\', '/')) = ? OR LOWER(REPLACE(np.path, '\', '/')) = ?)
+		 ORDER BY LENGTH(np.path) ASC, LOWER(np.path) ASC, np.path ASC, np.uuid ASC
+		 LIMIT 1`,
+		withExt, norm,
+	).Scan(&foundID)
+	if err == nil {
+		return foundID, "stem", nil
+	}
+	if err != sql.ErrNoRows {
+		return "", "", fmt.Errorf("resolver: lookup path %q: %w", norm, err)
+	}
+
+	// 3. Bare filename anywhere in the vault: shortest path wins, ties alphabetically.
+	if !strings.Contains(norm, "/") {
+		suffix := "/" + norm + ".md"
+		err = tx.QueryRow(
+			`SELECT np.uuid
+			 FROM note_paths np
+			 JOIN nodes n ON n.id = np.uuid
+			 WHERE n.type = 'note' AND n.deleted_at IS NULL
+			   AND SUBSTR(LOWER(REPLACE(np.path, '\', '/')), -LENGTH(?)) = ?
+			 ORDER BY LENGTH(np.path) ASC, LOWER(np.path) ASC, np.path ASC, np.uuid ASC
+			 LIMIT 1`,
+			suffix, suffix,
+		).Scan(&foundID)
+		if err == nil {
+			return foundID, "stem", nil
+		}
+		if err != sql.ErrNoRows {
+			return "", "", fmt.Errorf("resolver: lookup basename %q: %w", norm, err)
+		}
+	}
+
+	// 4. Live note title, ties broken by id ASC.
+	err = tx.QueryRow(
+		`SELECT id FROM nodes WHERE type = 'note' AND LOWER(title) = ? AND deleted_at IS NULL ORDER BY id ASC LIMIT 1`,
+		norm,
+	).Scan(&foundID)
+	if err == nil {
+		return foundID, "title", nil
+	}
+	if err != sql.ErrNoRows {
+		return "", "", fmt.Errorf("resolver: lookup title %q: %w", norm, err)
+	}
+
+	return "", "", nil
 }
 
 // PromoteKey represents a key that can be matched against dangling_links
@@ -211,11 +274,21 @@ func promoteDanglingInTx(ctx context.Context, tx *graph.WriteTx, noteID string, 
 		return 0, nil
 	}
 
+	seenKeys := make(map[string]struct{}, len(keys))
 	var promoted int
 	for _, key := range keys {
+		normKey := NormalizeTarget(key.Key)
+		if normKey == "" {
+			continue
+		}
+		if _, dup := seenKeys[normKey]; dup {
+			continue
+		}
+		seenKeys[normKey] = struct{}{}
+
 		rows, err := tx.Query(
 			`SELECT id, src_node_id, target_key, target_kind FROM dangling_links WHERE target_key = ?`,
-			key.Key,
+			normKey,
 		)
 		if err != nil {
 			return promoted, fmt.Errorf("PromoteDangling: query: %w", err)
@@ -234,6 +307,9 @@ func promoteDanglingInTx(ctx context.Context, tx *graph.WriteTx, noteID string, 
 			matches = append(matches, dr)
 		}
 		rows.Close()
+		if err := rows.Err(); err != nil {
+			return promoted, fmt.Errorf("PromoteDangling: rows: %w", err)
+		}
 
 		for _, dr := range matches {
 			if dr.srcNodeID == noteID {
@@ -244,26 +320,41 @@ func promoteDanglingInTx(ctx context.Context, tx *graph.WriteTx, noteID string, 
 				continue
 			}
 
-			attrsJSON := buildLinkAttrs(dr.targetKey, dr.targetKind, true)
-			_, err := edges.Create(ctx, tx, edges.Edge{
-				Src:   dr.srcNodeID,
-				Dst:   noteID,
-				Label: string(edges.EdgeTypeLinksTo),
-				Attrs: attrsJSON,
-			}, nodes.Author{Name: "agent:wikilink-resolver"})
+			// edges has no unique constraint on (src, dst, label); check before
+			// creating so revivals and multi-spelling dangling rows never
+			// mint duplicate edges, while still removing every matched row.
+			exists, err := edges.Exists(ctx, tx, dr.srcNodeID, noteID, edges.EdgeTypeLinksTo)
 			if err != nil {
-				// If edge creation fails (e.g. dst node doesn't exist or
-				// duplicate), still delete the dangling row to avoid
-				// accumulating stale entries.
-				if !strings.Contains(err.Error(), "edges.Create: dst node") {
-					return promoted, fmt.Errorf("PromoteDangling: create edge %s -> %s: %w", dr.srcNodeID, noteID, err)
+				return promoted, fmt.Errorf("PromoteDangling: check edge %s -> %s: %w", dr.srcNodeID, noteID, err)
+			}
+
+			created := false
+			if !exists {
+				attrsJSON := buildLinkAttrs(dr.targetKey, dr.targetKind, true)
+				_, err := edges.Create(ctx, tx, edges.Edge{
+					Src:   dr.srcNodeID,
+					Dst:   noteID,
+					Label: string(edges.EdgeTypeLinksTo),
+					Attrs: attrsJSON,
+				}, nodes.Author{Name: "agent:wikilink-resolver"})
+				if err != nil {
+					// If edge creation fails (e.g. dst node doesn't exist),
+					// still delete the dangling row to avoid accumulating stale entries.
+					if !strings.Contains(err.Error(), "edges.Create: dst node") {
+						return promoted, fmt.Errorf("PromoteDangling: create edge %s -> %s: %w", dr.srcNodeID, noteID, err)
+					}
+				} else {
+					created = true
 				}
 			}
-			// Delete the dangling row
+
+			// Delete the dangling row whether or not a new edge was created.
 			if _, err := tx.Exec(`DELETE FROM dangling_links WHERE id = ?`, dr.id); err != nil {
 				return promoted, fmt.Errorf("PromoteDangling: delete: %w", err)
 			}
-			promoted++
+			if created {
+				promoted++
+			}
 		}
 	}
 	return promoted, nil

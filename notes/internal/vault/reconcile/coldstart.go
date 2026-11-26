@@ -305,11 +305,9 @@ func (r *Reconciler) applyMove(
 }
 
 // softDeleteCached tombstones a note_paths entry that no longer exists on disk.
-// It derives the stem and title needed by SoftDeleteNoteTx from the cache row
-// and the live node, then calls SoftDeleteNoteTx inside a single write tx.
+// It supplies the cached relative path and live node title to SoftDeleteNoteTx
+// inside a single write tx after forgetting the path cache row.
 func (r *Reconciler) softDeleteCached(ctx context.Context, e cachedPathEntry) error {
-	stem := stemFromRelPath(e.path)
-
 	// Read the live node title (if any).
 	var title string
 	err := r.g.DoRead(ctx, func(tx *graph.ReadTx) error {
@@ -348,7 +346,7 @@ func (r *Reconciler) softDeleteCached(ctx context.Context, e cachedPathEntry) er
 		if err := forgetUUIDInTx(tx, e.uuid); err != nil {
 			return err
 		}
-		return nodes.SoftDeleteNoteTx(ctx, tx, e.uuid, stem, title, author)
+		return nodes.SoftDeleteNoteTx(ctx, tx, e.uuid, e.path, title, author)
 	})
 	if txErr != nil {
 		if txErr == graph.ErrNotFound {

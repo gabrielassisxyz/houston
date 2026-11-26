@@ -22,6 +22,8 @@ import { bold, italic, link } from "@/lib/markdown-edit";
 import { isSubmitKey } from "@/lib/keyboard-shortcuts";
 import { AiAssistPanel } from "@/components/ai-assist-panel";
 import { ReviewLinkChips } from "@/components/review-link-chips";
+import { ChainSection } from "@/components/chain-section";
+import { useCapabilities } from "@/hooks/use-capabilities";
 import { reviewLinks } from "@/lib/review-links";
 import {
   useUpdateBead,
@@ -229,6 +231,7 @@ function DrawerBody({
   const archive = useArchiveBead();
   const del = useDeleteBead();
   const createGate = useCreateGate();
+  const caps = useCapabilities();
 
   const copyLink = () => {
     const url = `${window.location.origin}/p/${encodeURIComponent(projectId)}?bead=${encodeURIComponent(bead.id)}`;
@@ -799,6 +802,12 @@ function DrawerBody({
           <Section>
             <Header icon="link" label="Links & attachments" count={links.length} />
             <ReviewLinkChips links={links} />
+          </Section>
+        )}
+
+        {caps.data?.chain === true && (
+          <Section>
+            <ChainSection projectId={projectId} beadId={bead.id} />
           </Section>
         )}
 

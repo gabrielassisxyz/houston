@@ -43,6 +43,7 @@ func Register(mux *http.ServeMux, d Deps) error {
 	registerVaultRoutes(mux, d)
 	registerNotesRoutes(mux, d)
 	registerNotesRefsRoutes(mux, d)
+	registerNotesSearchRoutes(mux, d)
 	mux.HandleFunc("GET /api/nodes/search", nodeSearchHandler(d.Graph))
 	registerNodeRelatedRoutes(mux, d.Graph)
 	registerNodeEdgeRoutes(mux, d.Graph)

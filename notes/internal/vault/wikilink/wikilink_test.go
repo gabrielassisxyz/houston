@@ -187,3 +187,97 @@ func TestParseMultipleLines(t *testing.T) {
 		}
 	}
 }
+
+// TestParseEmbedsIgnored verifies that ![[...]] embeds are not treated as note links.
+func TestParseEmbedsIgnored(t *testing.T) {
+	content := "![[image.png]] and ![[OtherNote]] and ![[Note|Alias]] and [[RealNote]] and bang! [[AfterBang]]."
+	links := Parse(content)
+	if len(links) != 2 {
+		t.Fatalf("expected 2 non-embed links, got %d: %+v", len(links), links)
+	}
+	if links[0].Target != "RealNote" {
+		t.Errorf("link[0]: expected 'RealNote', got %q", links[0].Target)
+	}
+	if links[1].Target != "AfterBang" {
+		t.Errorf("link[1]: expected 'AfterBang', got %q", links[1].Target)
+	}
+}
+
+// TestParseNonNoteExtensionsIgnored verifies every known attachment extension is
+// ignored (case-insensitively and with anchors), while dotted note names are kept.
+func TestParseNonNoteExtensionsIgnored(t *testing.T) {
+	ignored := []string{
+		"[[photo.png]]", "[[photo.PNG]]", "[[a/b.jpg]]", "[[a.jpeg]]",
+		"[[a.gif]]", "[[a.svg]]", "[[a.webp]]", "[[report.pdf]]",
+		"[[report.PDF#page=2]]", "[[clip.mp3]]", "[[clip.mp4]]",
+		"[[clip.wav]]", "[[data.csv]]", "[[sheet.xlsx]]", "[[doc.docx]]",
+		"[[deck.pptx]]", "[[bundle.zip]]", "[[bundle.tar]]", "[[bundle.tar.gz]]",
+	}
+	for _, raw := range ignored {
+		if links := Parse(raw); len(links) != 0 {
+			t.Errorf("Parse(%q): expected 0 links for non-note attachment, got %+v", raw, links)
+		}
+	}
+
+	kept := []struct {
+		raw    string
+		target string
+	}{
+		{"[[2026.11.25]]", "2026.11.25"},
+		{"[[v1.2]]", "v1.2"},
+		{"[[2^n]]", "2^n"},
+		{"[[a/b.md]]", "a/b.md"},
+		{"[[Note#Heading]]", "Note#Heading"},
+		{"[[Note#^block]]", "Note#^block"},
+	}
+	for _, tc := range kept {
+		links := Parse(tc.raw)
+		if len(links) != 1 || links[0].Target != tc.target {
+			t.Errorf("Parse(%q): got %+v, want single target %q", tc.raw, links, tc.target)
+		}
+	}
+}
+
+// TestParseAnchorOnlySkipped verifies [[#Heading]] and [[^block]] produce no links.
+func TestParseAnchorOnlySkipped(t *testing.T) {
+	links := Parse("Jump to [[#Heading]], [[#Heading|Alias]], or [[^block-1]] and [[Keep]].")
+	if len(links) != 1 {
+		t.Fatalf("expected 1 link (only Keep), got %d: %+v", len(links), links)
+	}
+	if links[0].Target != "Keep" {
+		t.Errorf("expected target 'Keep', got %q", links[0].Target)
+	}
+}
+
+// TestNormalizeTarget covers anchor stripping, anchor-only links, caret inside
+// names, path separator normalization, .md stripping, and lowercasing.
+func TestNormalizeTarget(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"Roadmap", "roadmap"},
+		{"Note#Heading", "note"},
+		{"Note#^block-id", "note"},
+		{"Note#A#B", "note"},
+		{"#Heading", ""},
+		{" #Heading", ""},
+		{"^block", ""},
+		{"2^n", "2^n"},
+		{"2026.11.25", "2026.11.25"},
+		{"v1.2", "v1.2"},
+		{"a/b.md", "a/b"},
+		{"A/B.MD", "a/b"},
+		{"a\\b\\Note.md", "a/b/note"},
+		{"a/b.md#Section", "a/b"},
+		{"  Sub/Note  #Heading ", "sub/note"},
+		{"550E8400-E29B-41D4-A716-446655440000", "550e8400-e29b-41d4-a716-446655440000"},
+		{"", ""},
+		{".md", ""},
+	}
+	for _, tc := range cases {
+		if got := NormalizeTarget(tc.in); got != tc.want {
+			t.Errorf("NormalizeTarget(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

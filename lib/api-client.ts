@@ -1,5 +1,6 @@
 import type { Bead, CreateInput, UpdateInput, DepType } from "./schema";
 import type { AllBeadsResponse } from "./aggregate";
+import type { Chain } from "./chain";
 
 export interface Meta {
   kind: "bd" | "br" | "demo";
@@ -180,6 +181,8 @@ export const api = {
   }),
   list: (projectId: string) => request<BeadsResponse>(`${base(projectId)}/beads`),
   get: (projectId: string, id: string) => request<Bead>(`${base(projectId)}/beads/${enc(id)}`),
+  chain: (projectId: string, id: string, signal?: AbortSignal) =>
+    request<Chain>(`${base(projectId)}/beads/${enc(id)}/chain`, { cache: "no-store", signal }),
   create: (projectId: string, input: CreateInput) =>
     request<Bead>(`${base(projectId)}/beads`, { method: "POST", body: JSON.stringify(input) }),
   update: (projectId: string, id: string, patch: UpdateInput) =>

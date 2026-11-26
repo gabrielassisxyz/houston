@@ -14,6 +14,9 @@ tracker as the single source of truth.
   and sprint planning backed by tracker labels.
 - **Work dashboard (`/work`)** — Framed view of the local collector page configured through
   `workDashboardUrl`.
+- **Chain** — From a bead to its work-tracker story or ticket, its epic or descendants, and its
+  repository's delivery pipeline, read from a local snapshot file (see [docs/chain.md](docs/chain.md)
+  and [docs/work-side-setup.md](docs/work-side-setup.md)).
 - **Dependencies and graph** — Typed dependencies in the detail drawer and an interactive React
   Flow dependency graph.
 - **Human-vs-agent attribution** — Writes are stamped with the configured human actor
@@ -55,9 +58,11 @@ Useful launcher flags (`node bin/houston-web.mjs --help`):
 ## Configuration
 
 Local settings live under `$XDG_CONFIG_HOME/houston/` (default `~/.config/houston/`):
-`config.json` stores the registered projects, human actor, allowlist, and polling interval;
-`sprints.json` stores sprint definitions. `workDashboardUrl` holds the work dashboard address
-framed at `/work` (see [docs/work-side-setup.md](docs/work-side-setup.md)).
+`config.json` stores the registered projects (each with an optional `pipelineRepo`), human actor,
+allowlist, and polling interval; `sprints.json` stores sprint definitions. `workDashboardUrl`
+holds the work dashboard address framed at `/work`, and `snapshotPath`, `serviceNowHost` and
+`githubOrgs` hold the chain setup read from the work snapshot
+(see [docs/work-side-setup.md](docs/work-side-setup.md)).
 
 Environment variables:
 
