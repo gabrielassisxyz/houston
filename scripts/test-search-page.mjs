@@ -31,8 +31,25 @@ let page;
 let context;
 let step = "start";
 
-function capsBody(notes) {
-  return { workDashboardUrl: null, chain: false, notes, obsidianVault: null };
+const OBS_VAULT = "My Vault";
+const OBS_PATH = "notas/Café com espaço #1 & +.md";
+const OBS_HREF = `obsidian://open?vault=${encodeURIComponent(OBS_VAULT)}&file=${encodeURIComponent(OBS_PATH)}`;
+
+function decodeObsidian(href) {
+  assert.ok(href.startsWith("obsidian://open?"), `obsidian scheme and path: ${href}`);
+  const qs = href.slice("obsidian://open?".length);
+  const parts = qs.split("&");
+  assert.equal(parts.length, 2, `vault and file params: ${href}`);
+  const params = {};
+  for (const part of parts) {
+    const i = part.indexOf("=");
+    params[part.slice(0, i)] = part.slice(i + 1);
+  }
+  return { vault: decodeURIComponent(params.vault), file: decodeURIComponent(params.file) };
+}
+
+function capsBody(notes, vault = null) {
+  return { workDashboardUrl: null, chain: false, notes, obsidianVault: vault };
 }
 
 async function newContext() {
@@ -47,9 +64,9 @@ async function newContext() {
   page.setDefaultTimeout(10_000);
 }
 
-async function installBase({ notes = true } = {}) {
+async function installBase({ notes = true, vault = null } = {}) {
   await context.route("**/api/capabilities", (route) =>
-    route.fulfill({ json: capsBody(notes) }),
+    route.fulfill({ json: capsBody(notes, vault) }),
   );
   await context.route("**/api/viewer-mode", (route) =>
     route.fulfill({ json: { readOnly: false } }),
@@ -482,7 +499,60 @@ try {
     await clearConfig();
   }
 
-  console.log("PASS search page: typing, filters, paging, reload, offset reset, slow answer, shortcut, invalid, hidden, unconfigured, unavailable, snippet");
+  // --- Obsidian link with encoding and no target ---
+  step = "obsidian link with encoding and no target";
+  await newContext();
+  await installBase({ notes: true, vault: OBS_VAULT });
+  await context.route("**/api/notes/search*", (route) =>
+    route.fulfill({ json: answer({ hits: [hit("n1", { title: "Special note", path: OBS_PATH })], total: 1 }) }),
+  );
+  await page.goto(`${base}/search?q=rollout`);
+  await hits().first().waitFor();
+  const searchAnchor = hits().first().locator("a");
+  assert.equal(await searchAnchor.count(), 1, "one obsidian anchor in the hit");
+  assert.equal(await searchAnchor.innerText(), OBS_PATH, "anchor text is the path");
+  const searchHref = await searchAnchor.getAttribute("href");
+  assert.equal(searchHref, OBS_HREF, "vault and file encoded with encodeURIComponent");
+  assert.equal(await searchAnchor.getAttribute("target"), null, "no target on the obsidian link");
+  const decodedSearch = decodeObsidian(searchHref);
+  assert.equal(decodedSearch.vault, OBS_VAULT, "vault decodes back");
+  assert.equal(decodedSearch.file, OBS_PATH, "path with spaces, accents, #, & and + decodes back");
+  await context.close();
+
+  // --- Plain path without the vault, and with an empty path ---
+  step = "plain path without vault and with empty path";
+  await newContext();
+  await installBase({ notes: true });
+  await context.route("**/api/notes/search*", (route) =>
+    route.fulfill({
+      json: answer({
+        hits: [
+          hit("n1", { title: "Special note", path: OBS_PATH }),
+          hit("n2", { title: "Empty path note", path: "" }),
+        ],
+        total: 2,
+      }),
+    }),
+  );
+  await page.goto(`${base}/search?q=rollout`);
+  await hits().first().waitFor();
+  assert.equal(await hits().count(), 2, "two hits");
+  assert.equal(await hits().first().locator("a").count(), 0, "no anchor without the vault");
+  assert.match(await hits().first().innerText(), /Café com espaço/, "plain path shows");
+  assert.equal(await hits().nth(1).locator("a").count(), 0, "no anchor for an empty path");
+  await context.close();
+
+  await newContext();
+  await installBase({ notes: true, vault: OBS_VAULT });
+  await context.route("**/api/notes/search*", (route) =>
+    route.fulfill({ json: answer({ hits: [hit("n9", { title: "Empty path note", path: "" })], total: 1 }) }),
+  );
+  await page.goto(`${base}/search?q=rollout`);
+  await hits().first().waitFor();
+  assert.equal(await hits().first().locator("a").count(), 0, "no anchor for an empty path even with the vault");
+  await context.close();
+
+  console.log("PASS search page: typing, filters, paging, reload, offset reset, slow answer, shortcut, invalid, hidden, unconfigured, unavailable, snippet, obsidian");
 } catch (error) {
   console.error(`FAIL at step "${step}": ${error.stack ?? error}`);
   process.exitCode = 1;
