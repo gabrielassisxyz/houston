@@ -12,6 +12,7 @@ import (
 	"github.com/gabrielassisxyz/houston/notes/internal/graph"
 	"github.com/gabrielassisxyz/houston/notes/internal/graph/nodes"
 	"github.com/gabrielassisxyz/houston/notes/internal/vault/frontmatter"
+	"github.com/gabrielassisxyz/houston/notes/internal/vault/vaultfile"
 )
 
 // ColdStart reconciles the vault on startup against the path cache and graph.
@@ -63,6 +64,11 @@ func (r *Reconciler) ColdStart(ctx context.Context) error {
 	found := make(map[string]struct{})
 
 	walkErr := filepath.WalkDir(r.vaultRoot, func(path string, d os.DirEntry, err error) error {
+		// A cancelled walk stops at once. The notes it has not reached look
+		// gone to the sweep below, which must not run.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if err != nil {
 			// Permission errors etc. - skip, do not abort.
 			return nil
@@ -77,7 +83,7 @@ func (r *Reconciler) ColdStart(ctx context.Context) error {
 		if d.IsDir() {
 			return nil
 		}
-		if filepath.Ext(path) != ".md" {
+		if !vaultfile.IsNoteFile(path) {
 			return nil
 		}
 
@@ -92,6 +98,10 @@ func (r *Reconciler) ColdStart(ctx context.Context) error {
 	})
 	if walkErr != nil {
 		return fmt.Errorf("coldstart: walk: %w", walkErr)
+	}
+	// Cancelled while reconciling the last file: the walk is not complete.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("coldstart: %w", err)
 	}
 	r.keepReportsOnly(found)
 
@@ -267,7 +277,9 @@ func (r *Reconciler) reconcileFile(
 
 // applyMove updates the path cache for a known UUID that moved to a new path.
 // If the hash is also different (sameHash==false), it additionally calls OnChange
-// to record the content revision.
+// to record the content revision. The row then keeps the old hash: OnChange
+// skips a file whose id, path and hash the cache already records, so writing
+// the new hash first would drop an edit made while the service was stopped.
 func (r *Reconciler) applyMove(
 	ctx context.Context,
 	old cachedPathEntry,
@@ -281,7 +293,11 @@ func (r *Reconciler) applyMove(
 	var displaced *pendingDelete
 	if err := r.g.DoWrite(ctx, func(tx *graph.WriteTx) error {
 		var err error
-		displaced, err = claimPathInTx(tx, old.uuid, newRelPath, diskHash)
+		hash := diskHash
+		if !sameHash {
+			hash = old.contentHash
+		}
+		displaced, err = claimPathInTx(tx, old.uuid, newRelPath, hash)
 		return err
 	}); err != nil {
 		return fmt.Errorf("applyMove cache update: %w", err)

@@ -370,6 +370,16 @@ func updateNode(ctx context.Context, tx *graph.WriteTx, spec NodeSpec, author Au
 		}
 	}
 
+	// A save that changes nothing - the same file reconciled twice, a write
+	// whose bytes are the ones already stored - adds no revision. A tag or ref
+	// change is read from the reconciliation's own lists, never by comparing
+	// slices: selectTags has no ORDER BY, so a reorder would look like a change.
+	if prevTitle.String == fts.Title && prevAttrs.String == string(newAttrs) &&
+		len(toAdd) == 0 && len(toRemove) == 0 &&
+		len(toAddRefs) == 0 && len(toRemoveRefs) == 0 {
+		return nil
+	}
+
 	// Find previous revision ID
 	var prevRevisionID sql.NullString
 	err = tx.QueryRow(

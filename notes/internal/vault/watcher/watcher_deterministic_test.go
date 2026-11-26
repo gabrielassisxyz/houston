@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -69,17 +70,59 @@ func (s *fakeScheduler) scheduled() int {
 	return len(s.timers)
 }
 
+// fakeBackend records the OS watches the watcher asks for, in order, and
+// refuses nothing.
+type fakeBackend struct {
+	mu      sync.Mutex
+	added   []string
+	removed []string
+	closed  bool
+}
+
+func (b *fakeBackend) Add(name string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.added = append(b.added, name)
+	return nil
+}
+
+func (b *fakeBackend) Remove(name string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.removed = append(b.removed, name)
+	return nil
+}
+
+func (b *fakeBackend) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.closed = true
+	return nil
+}
+
+func (b *fakeBackend) snapshot() (added, removed []string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.added...), append([]string(nil), b.removed...)
+}
+
 // startInjected builds a watcher whose clock and raw events are the test's, and
 // returns the raw-event channel to feed it.
 func startInjected(t *testing.T, sched *fakeScheduler) (*Watcher, chan fsnotify.Event) {
 	t.Helper()
 	raw := make(chan fsnotify.Event, 64)
 	errs := make(chan error, 1)
-	w := newWithSources(t.TempDir(), Config{CoalesceWindow: time.Hour}, sched, raw, errs)
+	w := newWithSources(t.TempDir(), Config{CoalesceWindow: time.Hour}, sched, raw, errs, &fakeBackend{})
 	if err := w.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	return w, raw
+}
+
+// under names a file below the watcher's root: the watcher refuses a path
+// outside it, so injected events must lie where a real one would.
+func under(w *Watcher, name string) string {
+	return filepath.Join(w.root, name)
 }
 
 // feed delivers raw events and waits until the watcher has scheduled the
@@ -108,7 +151,7 @@ func TestCoalescingEmitsOneEventForABurst(t *testing.T) {
 	w, raw := startInjected(t, sched)
 	defer w.Stop()
 
-	path := "/vault/coalesce.md"
+	path := under(w, "coalesce.md")
 	burst := make([]fsnotify.Event, 5)
 	for i := range burst {
 		burst[i] = fsnotify.Event{Name: path, Op: fsnotify.Write}
@@ -150,7 +193,7 @@ func TestCoalescingKeepsTheMostSignificantKind(t *testing.T) {
 	w, raw := startInjected(t, sched)
 	defer w.Stop()
 
-	path := "/vault/gone.md"
+	path := under(w, "gone.md")
 	feed(t, sched, raw, 3,
 		fsnotify.Event{Name: path, Op: fsnotify.Write},
 		fsnotify.Event{Name: path, Op: fsnotify.Remove},
@@ -176,8 +219,8 @@ func TestCoalescingKeepsPathsIndependent(t *testing.T) {
 	defer w.Stop()
 
 	feed(t, sched, raw, 2,
-		fsnotify.Event{Name: "/vault/a.md", Op: fsnotify.Write},
-		fsnotify.Event{Name: "/vault/b.md", Op: fsnotify.Write},
+		fsnotify.Event{Name: under(w, "a.md"), Op: fsnotify.Write},
+		fsnotify.Event{Name: under(w, "b.md"), Op: fsnotify.Write},
 	)
 	if fired := sched.fireDue(); fired != 2 {
 		t.Fatalf("expected one coalescer per path, %d fired", fired)
@@ -192,7 +235,7 @@ func TestCoalescingKeepsPathsIndependent(t *testing.T) {
 			t.Fatalf("expected 2 events, got %d", len(seen))
 		}
 	}
-	if !seen["/vault/a.md"] || !seen["/vault/b.md"] {
+	if !seen[under(w, "a.md")] || !seen[under(w, "b.md")] {
 		t.Errorf("expected an event for each path, got %v", seen)
 	}
 }
@@ -226,7 +269,7 @@ func TestStopReleasesCancelledCoalescerTokens(t *testing.T) {
 
 	burst := make([]fsnotify.Event, 20)
 	for i := range burst {
-		burst[i] = fsnotify.Event{Name: "/vault/churn.md", Op: fsnotify.Write}
+		burst[i] = fsnotify.Event{Name: under(w, "churn.md"), Op: fsnotify.Write}
 	}
 	feed(t, sched, raw, 20, burst...)
 
@@ -247,7 +290,7 @@ func TestStopWithACoalescerAlreadyDue(t *testing.T) {
 	sched := &fakeScheduler{}
 	w, raw := startInjected(t, sched)
 
-	feed(t, sched, raw, 1, fsnotify.Event{Name: "/vault/due.md", Op: fsnotify.Write})
+	feed(t, sched, raw, 1, fsnotify.Event{Name: under(w, "due.md"), Op: fsnotify.Write})
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -275,13 +318,13 @@ func TestStopDoesNotHangOnAFullBuffer(t *testing.T) {
 	const capacity = 256
 	events := make([]fsnotify.Event, capacity)
 	for i := range events {
-		events[i] = fsnotify.Event{Name: "/vault/f" + string(rune('a'+i%26)) + string(rune('a'+i/26)) + ".md", Op: fsnotify.Write}
+		events[i] = fsnotify.Event{Name: under(w, "f"+string(rune('a'+i%26))+string(rune('a'+i/26))+".md"), Op: fsnotify.Write}
 	}
 	feed(t, sched, raw, capacity, events...)
 	sched.fireDue()
 
 	// One more, left pending: its send will find the buffer full.
-	feed(t, sched, raw, capacity+1, fsnotify.Event{Name: "/vault/overflow.md", Op: fsnotify.Write})
+	feed(t, sched, raw, capacity+1, fsnotify.Event{Name: under(w, "overflow.md"), Op: fsnotify.Write})
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -317,7 +360,7 @@ func TestEventsAfterStopAreNotScheduled(t *testing.T) {
 	w.Stop()
 
 	before := sched.scheduled()
-	w.handleEvent(fsnotify.Event{Name: "/vault/late.md", Op: fsnotify.Write})
+	w.handleEvent(fsnotify.Event{Name: under(w, "late.md"), Op: fsnotify.Write})
 	if after := sched.scheduled(); after != before {
 		t.Errorf("expected no coalescer scheduled after Stop, went from %d to %d", before, after)
 	}

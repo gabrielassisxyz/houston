@@ -11,9 +11,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+
+	"github.com/gabrielassisxyz/houston/notes/internal/vault/vaultfile"
 )
 
 // EventKind represents the type of a filesystem change event.
@@ -24,6 +27,10 @@ const (
 	KindChange        EventKind = "change"
 	KindDelete        EventKind = "delete"
 	KindMoveCandidate EventKind = "move_candidate"
+	// KindDirDelete reports a tracked directory removed or renamed away. No
+	// event names the notes it held, and the watcher has no access to the
+	// index, so the reconciler looks them up under the directory's path.
+	KindDirDelete EventKind = "dir_delete"
 )
 
 // ChangeEvent is a normalized filesystem event emitted by the Watcher.
@@ -67,15 +74,24 @@ func (realScheduler) AfterFunc(d time.Duration, f func()) stoppableTimer {
 	return time.AfterFunc(d, f)
 }
 
+// notifyBackend is the part of *fsnotify.Watcher this package drives: the OS
+// watches, one per directory. Tests supply a fake, so a directory moved in or
+// out of the vault can be played without the OS and its timing.
+type notifyBackend interface {
+	Add(name string) error
+	Remove(name string) error
+	Close() error
+}
+
 // Watcher watches a root directory recursively for .md file changes
 // and emits coalesced ChangeEvents on a channel.
 type Watcher struct {
 	root   string
 	events chan ChangeEvent
 	cfg    Config
-	// fsw is nil when the raw event source was injected, which is how the
-	// coalescing tests run without touching the filesystem's notify API.
-	fsw       *fsnotify.Watcher
+	// backend holds the OS watches. Production passes the fsnotify watcher
+	// whose channels feed rawEvents and rawErrors; tests inject both.
+	backend   notifyBackend
 	sched     timerScheduler
 	rawEvents <-chan fsnotify.Event
 	rawErrors <-chan error
@@ -90,6 +106,10 @@ type Watcher struct {
 	dirs         map[string]struct{} // tracked directories
 	timers       map[string]stoppableTimer
 	pending      map[string][]EventKind // pending events per path (latest kind wins)
+
+	// dropped records that an event was lost - the events buffer was full,
+	// or the kernel's own queue overflowed - so the consumer can rescan.
+	dropped atomic.Bool
 }
 
 // New creates a new Watcher for the given root directory.
@@ -113,7 +133,7 @@ func New(root string, cfg Config) (*Watcher, error) {
 		root:         absRoot,
 		events:       make(chan ChangeEvent, 256),
 		cfg:          cfg,
-		fsw:          fsw,
+		backend:      fsw,
 		sched:        realScheduler{},
 		rawEvents:    fsw.Events,
 		rawErrors:    fsw.Errors,
@@ -126,12 +146,12 @@ func New(root string, cfg Config) (*Watcher, error) {
 	return w, nil
 }
 
-// newWithSources builds a Watcher whose clock and raw event source are supplied
-// by the caller and whose fsnotify watcher is absent. Only tests use it: the
-// coalescing and shutdown invariants are about this package's own bookkeeping,
-// and driving them through real inotify delivery is what made the original test
-// assert a timing window by sleeping.
-func newWithSources(root string, cfg Config, sched timerScheduler, raw <-chan fsnotify.Event, rawErrs <-chan error) *Watcher {
+// newWithSources builds a Watcher whose clock, raw event source and OS watches
+// are supplied by the caller. Only tests use it: the coalescing, shutdown and
+// directory invariants are about this package's own bookkeeping, and driving
+// them through real inotify delivery is what made the original test assert a
+// timing window by sleeping.
+func newWithSources(root string, cfg Config, sched timerScheduler, raw <-chan fsnotify.Event, rawErrs <-chan error, backend notifyBackend) *Watcher {
 	if cfg.CoalesceWindow <= 0 {
 		cfg.CoalesceWindow = DefaultCoalesceWindow
 	}
@@ -139,6 +159,7 @@ func newWithSources(root string, cfg Config, sched timerScheduler, raw <-chan fs
 		root:         root,
 		events:       make(chan ChangeEvent, 256),
 		cfg:          cfg,
+		backend:      backend,
 		sched:        sched,
 		rawEvents:    raw,
 		rawErrors:    rawErrs,
@@ -154,16 +175,21 @@ func (w *Watcher) Events() <-chan ChangeEvent {
 	return w.events
 }
 
+// TakeDropped reports whether an event was lost since the last call, and
+// clears the flag. A true answer means the index may have missed a change
+// that only a rescan of the vault will find.
+func (w *Watcher) TakeDropped() bool {
+	return w.dropped.Swap(false)
+}
+
 // Start begins watching the root directory recursively.
 // It returns after the initial recursive walk to add watches.
 func (w *Watcher) Start(ctx context.Context) error {
-	// Add watches for all existing directories recursively. Skipped when the
-	// raw source was injected: there is no fsnotify watcher to add them to.
-	if w.fsw != nil {
-		if err := w.addDirRecursive(w.root); err != nil {
-			w.fsw.Close()
-			return fmt.Errorf("add watches recursively: %w", err)
-		}
+	// Add watches for all existing directories recursively. The notes already
+	// in them are the cold start's to read, so none is reported here.
+	if err := w.addDirRecursive(w.root, false); err != nil {
+		w.backend.Close()
+		return fmt.Errorf("add watches recursively: %w", err)
 	}
 
 	ctx, w.cancel = context.WithCancel(ctx)
@@ -211,27 +237,34 @@ func (w *Watcher) Stop() {
 
 	w.wg.Wait()
 
-	if w.fsw != nil {
-		w.fsw.Close()
-	}
+	w.backend.Close()
 	close(w.events)
 }
 
-// addDirRecursive adds a watch for the given directory and all subdirectories.
+// addDirRecursive adds a watch for the given directory and all subdirectories,
+// skipping dot-directories below the root. With reportNotes it also schedules a
+// change for every note it passes: a directory moved into the vault arrives as
+// one event on the directory, and no event will ever name the notes inside it.
 // Errors for individual directories are logged but don't stop the walk.
-func (w *Watcher) addDirRecursive(dir string) error {
+func (w *Watcher) addDirRecursive(dir string, reportNotes bool) error {
 	return filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
-		if !d.IsDir() {
+		rel, relErr := vaultfile.VaultRel(w.root, path)
+		if relErr != nil || vaultfile.IsHiddenRel(rel) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
-		// Skip hidden directories
-		if strings.HasPrefix(d.Name(), ".") && path != w.root {
-			return filepath.SkipDir
+		if !d.IsDir() {
+			if reportNotes && vaultfile.IsNoteFile(path) {
+				w.schedule(path, KindCreate)
+			}
+			return nil
 		}
-		if err := w.fsw.Add(path); err != nil {
+		if err := w.backend.Add(path); err != nil {
 			slog.Warn("watcher: add watch failed",
 				"path", path,
 				"error", err,
@@ -243,6 +276,42 @@ func (w *Watcher) addDirRecursive(dir string) error {
 		w.mu.Unlock()
 		return nil
 	})
+}
+
+// isTrackedDir reports whether dir has a watch of this watcher's.
+func (w *Watcher) isTrackedDir(dir string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	_, ok := w.dirs[dir]
+	return ok
+}
+
+// forgetDirTree drops dir and every tracked directory below it from the set
+// and removes their OS watches, reporting whether dir was tracked. A directory
+// moved out keeps its inode, so inotify would go on reporting events from it
+// under the old names; removal errors are expected for a deleted directory,
+// whose watch the kernel already dropped, and are ignored.
+func (w *Watcher) forgetDirTree(dir string) bool {
+	w.mu.Lock()
+	if _, ok := w.dirs[dir]; !ok {
+		w.mu.Unlock()
+		return false
+	}
+	pruned := []string{dir}
+	delete(w.dirs, dir)
+	prefix := dir + string(filepath.Separator)
+	for d := range w.dirs {
+		if strings.HasPrefix(d, prefix) {
+			delete(w.dirs, d)
+			pruned = append(pruned, d)
+		}
+	}
+	w.mu.Unlock()
+
+	for _, d := range pruned {
+		_ = w.backend.Remove(d)
+	}
+	return true
 }
 
 func (w *Watcher) loop(ctx context.Context) {
@@ -261,37 +330,57 @@ func (w *Watcher) loop(ctx context.Context) {
 			if !ok {
 				return
 			}
+			if errors.Is(err, fsnotify.ErrEventOverflow) {
+				// The kernel's queue overflowed: events were lost before
+				// they ever reached this process.
+				w.dropped.Store(true)
+			}
 			slog.Error("watcher: fsnotify error", "error", err)
 		}
 	}
 }
 
 func (w *Watcher) handleEvent(event fsnotify.Event) {
-	path := event.Name
+	path := filepath.Clean(event.Name)
 
-	// Only care about .md files and directories (for recursive watch extension).
+	// Dot-files and dot-directories are judged by the path below the root,
+	// never by the directories above it, so a vault under a dot-named
+	// directory is watched; a path outside the root is refused as such.
+	rel, err := vaultfile.VaultRel(w.root, path)
+	if err != nil {
+		slog.Debug("watcher: event outside the vault root ignored", "path", path)
+		return
+	}
+	if vaultfile.IsHiddenRel(rel) {
+		return
+	}
+
+	// Only care about notes and directories (for recursive watch extension).
 	isDir := false
 	if info, err := os.Stat(path); err == nil && info.IsDir() {
 		isDir = true
 	}
 
-	if !isDir {
-		if filepath.Ext(path) != ".md" {
-			return
-		}
+	// A tracked directory removed or renamed away is no longer a directory on
+	// disk, and its name has no note extension, so it is recognised by its
+	// entry in the directory set, before the extension filter drops it.
+	if !isDir && (event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename)) && w.forgetDirTree(path) {
+		w.schedule(path, KindDirDelete)
+		return
 	}
 
-	// When a new directory is created, extend watches into it.
-	if isDir && (event.Has(fsnotify.Create) || event.Has(fsnotify.Rename)) {
-		// On some systems, Rename is emitted when a dir is moved in.
-		if event.Has(fsnotify.Create) {
-			_ = w.addDirRecursive(path)
-		}
-		return // Directory events for new dirs don't emit ChangeEvents
-	}
-
-	// For existing directories, just track; don't emit events.
 	if isDir {
+		// A directory created or renamed into the vault (a move in arrives as
+		// Create on Linux and as Rename on some other systems): watch it and
+		// everything below it, and report the notes it brought. An existing
+		// directory is already watched.
+		if (event.Has(fsnotify.Create) || event.Has(fsnotify.Rename)) && !w.isTrackedDir(path) {
+			_ = w.addDirRecursive(path, true)
+		}
+		return
+	}
+
+	if !vaultfile.IsNoteFile(path) {
 		return
 	}
 
@@ -300,7 +389,11 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	if kind == "" {
 		return
 	}
+	w.schedule(path, kind)
+}
 
+// schedule records kind for path and (re)starts the path's coalesce timer.
+func (w *Watcher) schedule(path string, kind EventKind) {
 	// Coalesce: reset the debounce timer for this path.
 	w.mu.Lock()
 
@@ -358,19 +451,30 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		case <-w.shuttingDown:
 			// Dropping a coalesced event during shutdown is the correct
 			// trade: the alternative is Stop hanging on a full buffer.
+		default:
+			// Never block. A first run that writes an id into thousands of
+			// notes raises an event for each write while nothing drains the
+			// buffer yet, and a blocking send would leave one goroutine
+			// waiting per event. The loss is recorded instead; the consumer
+			// takes the flag and rescans.
+			w.dropped.Store(true)
+			slog.Warn("watcher: events buffer full; event dropped", "kind", ev.Kind, "path", ev.Path)
 		}
 	})
 	w.mu.Unlock()
 }
 
 // coalesceKinds picks the most significant kind from a sequence.
-// delete and move_candidate take highest priority.
+// dir_delete, delete and move_candidate take highest priority, in that order.
 func coalesceKinds(kinds []EventKind) EventKind {
+	hasDirDelete := false
 	hasDelete := false
 	hasMove := false
 
 	for _, k := range kinds {
 		switch k {
+		case KindDirDelete:
+			hasDirDelete = true
 		case KindDelete:
 			hasDelete = true
 		case KindMoveCandidate:
@@ -381,6 +485,9 @@ func coalesceKinds(kinds []EventKind) EventKind {
 		}
 	}
 
+	if hasDirDelete {
+		return KindDirDelete
+	}
 	if hasDelete {
 		return KindDelete
 	}

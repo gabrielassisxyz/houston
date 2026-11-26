@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gabrielassisxyz/houston/notes/internal/config"
@@ -22,27 +23,84 @@ type Service struct {
 	g   *graph.Graph
 	cfg config.VaultConfig
 
-	w *watcher.Watcher
-	r *reconcile.Reconciler
+	// r is built by New and never reassigned, so Status reads it from any
+	// goroutine; Start used to assign it, unguarded, while health could read.
+	r        *reconcile.Reconciler
+	indexing atomic.Bool
+
+	// newSource and coldStart are the seams tests replace: the watcher, and
+	// the pass over the whole vault that the first index and every rescan run.
+	newSource func(root string, cfg watcher.Config) (eventSource, error)
+	coldStart func(ctx context.Context) error
+
+	w eventSource
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+}
+
+// eventSource is the part of *watcher.Watcher the service drives.
+type eventSource interface {
+	Start(ctx context.Context) error
+	Events() <-chan watcher.ChangeEvent
+	TakeDropped() bool
+	Stop()
+}
+
+// Status is the service's readiness, safe to read from any goroutine from New
+// on.
+type Status struct {
+	// Indexing is true until the first index has returned.
+	Indexing bool
+	// Reports counts, by kind, the files the index left out or indexed with
+	// something other than what they say. Every kind is present.
+	Reports map[reconcile.ReportKind]int
 }
 
 // New creates a Service for the given graph and vault config.
 // cfg must already have defaults applied (ApplyDefaults) and be validated
 // (Validate). It is a programming error to call New with an empty Root.
 func New(g *graph.Graph, cfg config.VaultConfig) *Service {
-	return &Service{g: g, cfg: cfg}
+	r := reconcile.New(g, cfg.Root)
+	r.SetDeleteWindow(moveWindow(cfg))
+	s := &Service{g: g, cfg: cfg, r: r, coldStart: r.ColdStart}
+	s.newSource = func(root string, wc watcher.Config) (eventSource, error) {
+		w, err := watcher.New(root, wc)
+		if err != nil {
+			return nil, err
+		}
+		return w, nil
+	}
+	s.indexing.Store(true)
+	return s
+}
+
+// Status reports whether the first index is still running and the current
+// counts of the reconciler's file reports.
+func (s *Service) Status() Status {
+	counts := make(map[reconcile.ReportKind]int)
+	for _, kind := range reconcile.ReportKinds() {
+		counts[kind] = 0
+	}
+	for _, rep := range s.r.Reports() {
+		counts[rep.Kind]++
+	}
+	return Status{Indexing: s.indexing.Load(), Reports: counts}
 }
 
 // Start runs the vault lifecycle:
-//  1. Constructs the reconciler and sets its delete window.
-//  2. Runs ColdStart (full vault → graph diff) before live watching.
-//  3. Constructs and starts the watcher.
-//  4. Spawns a goroutine that routes watcher events to the reconciler.
-//  5. Spawns a ticker goroutine that calls FlushExpired at moveWindow cadence.
-//  6. If RescanIntervalSec > 0, spawns a periodic rescan goroutine.
+//  1. Constructs and starts the watcher, so its OS watches are armed before
+//     the first index: a note written while the index runs raises an event,
+//     which the watcher keeps while nothing reads it yet.
+//  2. Runs ColdStart (full vault → graph diff). If it fails or is cancelled,
+//     the watcher is stopped and Start returns the error.
+//  3. Rescans once if the watcher dropped events while nothing drained them.
+//  4. Spawns the goroutine that routes watcher events to the reconciler,
+//     calls FlushExpired at moveWindow cadence, checks for dropped events on
+//     each of those ticks, and, if RescanIntervalSec > 0, rescans periodically.
+//     It starts only now, so live events never run against the cold start's
+//     snapshot and its tombstone sweep, and one goroutine doing all four keeps
+//     every later rescan out of the way of live events too.
 //
 // Start fails fast with a clear error when the vault root is missing or not a
 // directory (even though Validate already caught this - belt-and-suspenders).
@@ -52,9 +110,6 @@ func (s *Service) Start(ctx context.Context) error {
 	}
 
 	root := s.cfg.Root
-	coalWindow := coalesceWindow(s.cfg)
-	mvWindow := moveWindow(s.cfg)
-
 	slog.Info("vault: starting",
 		"root", root,
 		"coalesce_window_ms", s.cfg.CoalesceWindowMs,
@@ -62,12 +117,27 @@ func (s *Service) Start(ctx context.Context) error {
 		"rescan_interval_sec", s.cfg.RescanIntervalSec,
 	)
 
-	// 1. Reconciler.
-	s.r = reconcile.New(s.g, root)
-	s.r.SetDeleteWindow(mvWindow)
+	innerCtx, cancel := context.WithCancel(ctx)
+	s.cancel = cancel
 
-	// 2. Cold-start reconciliation before live watching.
-	if err := s.r.ColdStart(ctx); err != nil {
+	// 1. Watcher, armed before the first index.
+	w, err := s.newSource(root, watcher.Config{CoalesceWindow: coalesceWindow(s.cfg)})
+	if err != nil {
+		cancel()
+		return fmt.Errorf("vault: create watcher: %w", err)
+	}
+	if err := w.Start(innerCtx); err != nil {
+		cancel()
+		return fmt.Errorf("vault: start watcher: %w", err)
+	}
+	s.w = w
+
+	// 2. First index.
+	err = s.coldStart(innerCtx)
+	s.indexing.Store(false)
+	if err != nil {
+		s.w.Stop()
+		cancel()
 		return fmt.Errorf("vault cold-start: %w", err)
 	}
 	coldStats := s.r.Stats()
@@ -78,34 +148,12 @@ func (s *Service) Start(ctx context.Context) error {
 		"revived", coldStats.NotesRevived,
 	)
 
-	// 3. Watcher.
-	w, err := watcher.New(root, watcher.Config{CoalesceWindow: coalWindow})
-	if err != nil {
-		return fmt.Errorf("vault: create watcher: %w", err)
-	}
-	s.w = w
+	// 3. Events lost while nothing drained them.
+	s.rescanIfDropped(innerCtx)
 
-	innerCtx, cancel := context.WithCancel(ctx)
-	s.cancel = cancel
-
-	if err := s.w.Start(innerCtx); err != nil {
-		cancel()
-		return fmt.Errorf("vault: start watcher: %w", err)
-	}
-
-	// 4. Event router goroutine.
+	// 4. Live routing.
 	s.wg.Add(1)
-	go s.routeEvents(innerCtx)
-
-	// 5. FlushExpired ticker goroutine.
-	s.wg.Add(1)
-	go s.flushTicker(innerCtx, mvWindow)
-
-	// 6. Optional periodic rescan.
-	if s.cfg.RescanIntervalSec > 0 {
-		s.wg.Add(1)
-		go s.rescanTicker(innerCtx, time.Duration(s.cfg.RescanIntervalSec)*time.Second)
-	}
+	go s.run(innerCtx, moveWindow(s.cfg), time.Duration(s.cfg.RescanIntervalSec)*time.Second)
 
 	slog.Info("vault: live watch started", "root", root)
 	return nil
@@ -124,14 +172,22 @@ func (s *Service) Stop() {
 	slog.Info("vault: stopped")
 }
 
-// routeEvents reads from the watcher's event channel and dispatches to the
-// reconciler. Handler errors are logged but do not terminate the loop.
-//
-// On Linux, inotify often coalesces a file create+write into a single KindChange
-// event. When OnChange returns graph.ErrNotFound (node not yet in the graph),
-// the router retries the path as OnCreate so the note is properly ingested.
-func (s *Service) routeEvents(ctx context.Context) {
+// run routes watcher events to the reconciler until the context ends or the
+// events channel closes. On every flush tick it tombstones the deletes whose
+// move window has elapsed and rescans if events were dropped, which also
+// recovers a kernel queue overflow during live running; with rescanEvery > 0
+// it also rescans on that interval as a safety net for missed fsnotify events
+// (e.g. watch-add failures).
+func (s *Service) run(ctx context.Context, flushEvery, rescanEvery time.Duration) {
 	defer s.wg.Done()
+	flush := time.NewTicker(flushEvery)
+	defer flush.Stop()
+	var rescanC <-chan time.Time
+	if rescanEvery > 0 {
+		t := time.NewTicker(rescanEvery)
+		defer t.Stop()
+		rescanC = t.C
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -140,87 +196,107 @@ func (s *Service) routeEvents(ctx context.Context) {
 			if !ok {
 				return
 			}
-			var err error
-			switch ev.Kind {
-			case watcher.KindCreate:
-				err = s.r.OnCreate(ctx, ev.Path)
-			case watcher.KindMoveCandidate:
-				// fsnotify reports Rename on the OLD path of a move, which has
-				// already vanished from disk. Identity is preserved by the
-				// create/change event on the NEW path (its embedded frontmatter
-				// UUID is recognized there), so a move_candidate whose file is
-				// gone is a no-op for us - not an error. If the path unexpectedly
-				// still exists, fall through to create handling.
-				if _, statErr := os.Stat(ev.Path); statErr == nil {
-					err = s.r.OnCreate(ctx, ev.Path)
-				} else {
-					slog.Debug("vault: move_candidate path already gone; identity handled by new-path event",
-						"path", ev.Path)
-				}
-			case watcher.KindChange:
-				err = s.r.OnChange(ctx, ev.Path)
-				if errors.Is(err, graph.ErrNotFound) {
-					// Node not in graph yet - this create+write was coalesced;
-					// treat it as a create.
-					err = s.r.OnCreate(ctx, ev.Path)
-				}
-			case watcher.KindDelete:
-				err = s.r.OnDelete(ctx, ev.Path)
-			}
-			if err != nil {
-				slog.Error("vault: reconcile event error",
-					"kind", ev.Kind,
-					"path", ev.Path,
-					"error", err,
-				)
-			}
+			s.route(ctx, ev)
+		case <-flush.C:
+			s.flushExpired(ctx)
+			s.rescanIfDropped(ctx)
+		case <-rescanC:
+			s.rescan(ctx, "periodic")
 		}
 	}
 }
 
-// flushTicker calls FlushExpired at the given cadence to tombstone deletes
-// whose move window has elapsed.
-func (s *Service) flushTicker(ctx context.Context, cadence time.Duration) {
-	defer s.wg.Done()
-	t := time.NewTicker(cadence)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			n, err := s.r.FlushExpired(ctx)
-			if err != nil {
-				slog.Error("vault: FlushExpired error", "error", err)
-				continue
-			}
-			if n > 0 {
-				slog.Info("vault: tombstoned expired deletes", "count", n)
-			}
+// route dispatches one watcher event to the reconciler. Handler errors are
+// logged but do not stop the caller.
+func (s *Service) route(ctx context.Context, ev watcher.ChangeEvent) {
+	var err error
+	switch ev.Kind {
+	case watcher.KindCreate:
+		err = s.r.OnCreate(ctx, ev.Path)
+	case watcher.KindMoveCandidate:
+		// fsnotify reports Rename on the OLD path of a move, which has already
+		// vanished from disk. It goes to OnDelete, which holds the delete for
+		// the move window: a move within the vault keeps the note's identity
+		// through the change at the new path, and a note moved where no event
+		// will name it again - into .trash/, a dot-directory nobody watches,
+		// or out of the vault - is tombstoned when the window ends. If the path
+		// unexpectedly still exists, fall through to create handling.
+		if fileExists(ev.Path) {
+			err = s.r.OnCreate(ctx, ev.Path)
+		} else {
+			err = s.r.OnDelete(ctx, ev.Path)
 		}
+	case watcher.KindChange:
+		err = s.change(ctx, ev.Path)
+	case watcher.KindDelete:
+		// A delete and a recreate inside one coalesce window - an editor that
+		// unlinks the file and writes it anew - coalesce to a delete for a
+		// file that is back on disk: that is a change, not a delete.
+		if fileExists(ev.Path) {
+			err = s.change(ctx, ev.Path)
+		} else {
+			err = s.r.OnDelete(ctx, ev.Path)
+		}
+	case watcher.KindDirDelete:
+		err = s.r.OnDirDelete(ctx, ev.Path)
+	}
+	if err != nil {
+		slog.Error("vault: reconcile event error",
+			"kind", ev.Kind,
+			"path", ev.Path,
+			"error", err,
+		)
 	}
 }
 
-// rescanTicker re-runs ColdStart at the given interval as a safety net for
-// missed fsnotify events (e.g. watch-add failures or OS-level dropped events).
-func (s *Service) rescanTicker(ctx context.Context, interval time.Duration) {
-	defer s.wg.Done()
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			slog.Info("vault: periodic rescan starting")
-			if err := s.r.ColdStart(ctx); err != nil {
-				slog.Error("vault: periodic rescan error", "error", err)
-				continue
-			}
-			stats := s.r.Stats()
-			slog.Info("vault: periodic rescan complete",
-				"total_events_processed", stats.EventsProcessed,
-			)
-		}
+// change hands a changed path to OnChange. On Linux, inotify often coalesces
+// a file create+write into a single change; when OnChange returns
+// graph.ErrNotFound (no node for the file's id yet), the path is retried as
+// OnCreate so the note is properly ingested.
+func (s *Service) change(ctx context.Context, path string) error {
+	err := s.r.OnChange(ctx, path)
+	if errors.Is(err, graph.ErrNotFound) {
+		err = s.r.OnCreate(ctx, path)
 	}
+	return err
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// flushExpired tombstones the deletes whose move window has elapsed.
+func (s *Service) flushExpired(ctx context.Context) {
+	n, err := s.r.FlushExpired(ctx)
+	if err != nil {
+		slog.Error("vault: FlushExpired error", "error", err)
+		return
+	}
+	if n > 0 {
+		slog.Info("vault: tombstoned expired deletes", "count", n)
+	}
+}
+
+// rescanIfDropped clears the watcher's dropped flag and, when it was set,
+// runs one rescan: the events lost are changes the index has not seen.
+func (s *Service) rescanIfDropped(ctx context.Context) {
+	if !s.w.TakeDropped() {
+		return
+	}
+	slog.Warn("vault: watcher dropped events; rescanning the vault")
+	s.rescan(ctx, "dropped events")
+}
+
+// rescan re-runs the cold start's pass over the whole vault.
+func (s *Service) rescan(ctx context.Context, reason string) {
+	slog.Info("vault: rescan starting", "reason", reason)
+	if err := s.coldStart(ctx); err != nil {
+		slog.Error("vault: rescan error", "reason", reason, "error", err)
+		return
+	}
+	slog.Info("vault: rescan complete",
+		"reason", reason,
+		"total_events_processed", s.r.Stats().EventsProcessed,
+	)
 }

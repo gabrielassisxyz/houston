@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gabrielassisxyz/houston/notes/internal/graph"
@@ -679,6 +680,20 @@ func TestColdStart_MoveAndEditWhileOff(t *testing.T) {
 	revsAfter := countRevisions(t, g, "moveedit-uuid")
 	if revsAfter != revsBefore+1 {
 		t.Errorf("revision count: got %d, want %d", revsAfter, revsBefore+1)
+	}
+
+	// The edit itself reached the graph.
+	if err := g.DoRead(ctx, func(tx *graph.ReadTx) error {
+		n, err := nodes.GetNote(ctx, tx, "moveedit-uuid")
+		if err != nil {
+			return err
+		}
+		if !strings.Contains(n.Body, "Edited.") {
+			t.Errorf("body after the cold start = %q, want the edit made while stopped", n.Body)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("GetNote: %v", err)
 	}
 }
 
