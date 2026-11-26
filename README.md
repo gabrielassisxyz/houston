@@ -16,7 +16,7 @@ tracker as the single source of truth.
   `workDashboardUrl`.
 - **Chain** — From a bead to its work-tracker story or ticket, its epic or descendants, and its
   repository's delivery pipeline, read from a local snapshot file (see [docs/chain.md](docs/chain.md)
-  and [docs/work-side-setup.md](docs/work-side-setup.md)).
+  and [docs/macos-setup.md](docs/macos-setup.md)).
 - **Notes search (`/search`)** — Ranked search over the work vault through the notes service, with
   tag, folder and kind filters, paging, and a per-hit `obsidian://open` link when `obsidianVault`
   names the vault. Related notes also appear in the chain's "Relacionados" panel
@@ -66,12 +66,12 @@ Local settings live under `$XDG_CONFIG_HOME/houston/` (default `~/.config/housto
 allowlist, and polling interval; `sprints.json` stores sprint definitions. `workDashboardUrl`
 holds the work dashboard address framed at `/work`, and `snapshotPath`, `serviceNowHost` and
 `githubOrgs` hold the chain setup read from the work snapshot
-(see [docs/work-side-setup.md](docs/work-side-setup.md)). `notesServiceUrl` holds the notes
+(see [docs/macos-setup.md](docs/macos-setup.md)). `notesServiceUrl` holds the notes
 service root address the server calls (an `http` or `https` loopback address at the root path,
 for example `http://127.0.0.1:3301/`), and `obsidianVault` holds the Obsidian vault name pages
 need to open notes (stored trimmed, never blank). Both are set through `PUT /api/config` and
 reported by the capabilities route; the install, first run and backup live under "Notes service"
-in [docs/work-side-setup.md](docs/work-side-setup.md). The module itself is documented in
+in [docs/macos-setup.md](docs/macos-setup.md). The module itself is documented in
 [notes/README.md](notes/README.md).
 
 Environment variables:
@@ -88,7 +88,7 @@ Environment variables:
 
 ## Running as a macOS login service
 
-See [docs/work-side-setup.md](docs/work-side-setup.md) for installing Houston as a `launchd` user
+See [docs/macos-setup.md](docs/macos-setup.md) for installing Houston as a `launchd` user
 agent with [scripts/install-services.sh](scripts/install-services.sh) and updating it with
 [scripts/update.sh](scripts/update.sh).
 
