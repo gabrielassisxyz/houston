@@ -1,13 +1,16 @@
 // Command houston is the notes service of Houston's own notes engine.
 //
-// Verbs: serve starts the service, health prints what a running service
-// answers, help prints the usage. Global flags: --config (default
+// Verbs: serve starts the service, preflight reports what the first index
+// would change, health prints what a running service answers, note reads and
+// writes vault notes, graph reads the knowledge graph, search searches it,
+// help prints the usage. Global flags: --config (default
 // ${XDG_CONFIG_HOME:-~/.config}/houston/notes.yaml), --server for the client
 // verbs, --json, and --help/-h/help. serve also takes --addr.
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -42,7 +45,15 @@ func main() {
 		if errors.As(err, &reported) {
 			os.Exit(exitCode(err))
 		}
-		fmt.Fprintln(os.Stderr, err)
+		// When --json was requested, a failing command still speaks JSON: the
+		// error becomes a structured envelope on stdout (stderr stays empty) so
+		// `houston <verb> --json | jq` sees a parseable failure instead of empty
+		// stdout + prose. Otherwise the human path: prose on stderr.
+		if wantsJSONOutput(os.Args[1:]) {
+			fmt.Fprintln(os.Stdout, errorEnvelope(err))
+		} else {
+			fmt.Fprintln(os.Stderr, err)
+		}
 		os.Exit(exitCode(err))
 	}
 }
@@ -131,6 +142,9 @@ Commands:
   serve         Start the notes service
   health        Print what a running service answers
   preflight     Report what the first index would change, writing nothing
+  note          Read and write vault notes
+  graph         Read the knowledge graph
+  search        Search note bodies, titles and refs
   help          Print this usage
 
 Run 'houston help <command>' for details.
@@ -179,6 +193,59 @@ Exits 0 when there is no error, 1 otherwise.
 `
 }
 
+func noteUsage() string {
+	return `houston note - read and write vault notes
+
+Usage:
+  houston [--config <path>] [--server <url>] note <list|read|write|append|delete|tags> [args...]
+
+Every path is vault-relative; the server resolves it against vault.root.
+
+  list            List notes with their graph node id, type and title
+  read            Print a note's contents
+  write           Create or overwrite a note from a file or stdin
+  append          Add a block at one end of an existing note, or under its first rule
+  delete          Move a note to the trash (requires --yes)
+  tags            List every note tag with the files carrying it
+
+Run 'houston help note <subcommand>' for details on each.
+`
+}
+
+func graphUsage() string {
+	return `houston graph - read the knowledge graph
+
+Usage:
+  houston [--config <path>] [--server <url>] graph <nodes|search|related|edges> [args...]
+
+Every subcommand is read-only.
+
+  nodes           List every live node in the graph
+  search          Search node titles
+  related         Show the nodes a node is related to
+  edges           List stored edges: the whole graph, or one node's
+
+Run 'houston help graph <subcommand>' for details on each.
+`
+}
+
+func searchUsage() string {
+	return `houston search - search note bodies, titles and refs
+
+Usage:
+  houston [--config <path>] [--server <url>] search <query...> [--tag <tag>] [--folder <folder>] [--kind <kind>] [--limit <n>] [--offset <n>] [--json]
+
+The positional words are joined with spaces into one query.
+
+  --tag <tag>       Only hits carrying this tag
+  --folder <folder> Only hits under this vault folder
+  --kind <kind>     Only hits of this kind: plano, implementacao, evidencia, nota
+  --limit <n>       Maximum hits in the page (server default: 20; it caps at 100)
+  --offset <n>      Skip this many hits before the page (default: 0)
+  --json            Emit {"hits","total","limit","offset"} verbatim.
+`
+}
+
 // dispatch parses the global flags once and runs the verb. stdout carries the
 // result, stderr carries nothing but errors: --json stdout stays a document
 // another tool can read whole.
@@ -220,11 +287,17 @@ func dispatch(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		return runHealthCmd(stdout, configPath, serverFlag, asJSON, args[1:])
 	case "preflight":
 		return runPreflightCmd(stdout, configPath, serverFlag, asJSON, args[1:])
+	case "note":
+		return runNoteCmd(stdout, configPath, serverFlag, asJSON, args[1:])
+	case "graph":
+		return runGraphCmd(stdout, configPath, serverFlag, asJSON, args[1:])
+	case "search":
+		return runSearchCmd(stdout, configPath, serverFlag, asJSON, args[1:])
 	default:
 		if strings.HasPrefix(args[0], "-") {
-			return usagef("houston: unknown flag %q - run: houston help", args[0])
+			return usagef("houston: unknown flag %q%s - run: houston help", args[0], didYouMean(args[0], []string{"--config", "--server", "--json", "--help"}))
 		}
-		return usagef("houston: unknown command %q - run: houston help", args[0])
+		return usagef("houston: unknown command %q%s - run: houston help", args[0], didYouMean(args[0], commandNames()))
 	}
 }
 
@@ -243,6 +316,12 @@ func helpTopic(args []string) (string, bool) {
 					return healthUsage(), true
 				case "preflight":
 					return preflightUsage(), true
+				case "note":
+					return noteUsage(), true
+				case "graph":
+					return graphUsage(), true
+				case "search":
+					return searchUsage(), true
 				}
 			}
 			return usage(), true
@@ -256,6 +335,12 @@ func helpTopic(args []string) (string, bool) {
 					return healthUsage(), true
 				case "preflight":
 					return preflightUsage(), true
+				case "note":
+					return noteUsage(), true
+				case "graph":
+					return graphUsage(), true
+				case "search":
+					return searchUsage(), true
 				}
 			}
 			return usage(), true
@@ -264,15 +349,39 @@ func helpTopic(args []string) (string, bool) {
 	return "", false
 }
 
-// rejectUnknownFlags fails loud on any leftover flag-looking argument, so a
-// typo'd flag is never silently treated as a positional argument.
-func rejectUnknownFlags(verb string, args []string) error {
+// wantsJSONOutput reports whether --json appears as a standalone token. --json
+// is always the boolean output flag across every verb (never a flag value), so
+// an exact-token scan is a reliable signal of "the caller wants machine output"
+// without threading the verb-local flag up to main.
+func wantsJSONOutput(args []string) bool {
 	for _, a := range args {
-		if strings.HasPrefix(a, "-") && a != "-" {
-			return usagef("houston: unknown flag %q for %s - run: houston help %s", a, verb, verb)
+		if a == "--json" {
+			return true
+		}
+		// Everything after the end-of-flags sentinel is payload, not flags.
+		if a == "--" {
+			return false
 		}
 	}
-	return nil
+	return false
 }
+
+// errorEnvelope renders a failed command as the same shape the success --json
+// paths use: ok:false, the message, and the exit code the process will return,
+// so a caller can branch on exitCode without re-parsing the prose.
+func errorEnvelope(err error) string {
+	env, marshalErr := json.Marshal(struct {
+		OK       bool   `json:"ok"`
+		Error    string `json:"error"`
+		ExitCode int    `json:"exitCode"`
+	}{OK: false, Error: err.Error(), ExitCode: exitCode(err)})
+	if marshalErr != nil {
+		// A message that will not marshal is still an error we must not swallow.
+		return fmt.Sprintf(`{"ok":false,"error":%q,"exitCode":%d}`, err.Error(), exitCode(err))
+	}
+	return string(env)
+}
+
+
 
 
