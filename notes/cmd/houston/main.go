@@ -145,6 +145,7 @@ Commands:
   note          Read and write vault notes
   graph         Read the knowledge graph
   search        Search note bodies, titles and refs
+  links         Print what the hub's links route answers for an identifier
   help          Print this usage
 
 Run 'houston help <command>' for details.
@@ -293,6 +294,8 @@ func dispatch(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		return runGraphCmd(stdout, configPath, serverFlag, asJSON, args[1:])
 	case "search":
 		return runSearchCmd(stdout, configPath, serverFlag, asJSON, args[1:])
+	case "links":
+		return runLinksCmd(stdout, configPath, serverFlag, asJSON, args[1:])
 	default:
 		if strings.HasPrefix(args[0], "-") {
 			return usagef("houston: unknown flag %q%s - run: houston help", args[0], didYouMean(args[0], []string{"--config", "--server", "--json", "--help"}))
@@ -322,6 +325,8 @@ func helpTopic(args []string) (string, bool) {
 					return graphUsage(), true
 				case "search":
 					return searchUsage(), true
+				case "links":
+					return linksUsage(), true
 				}
 			}
 			return usage(), true
@@ -341,6 +346,8 @@ func helpTopic(args []string) (string, bool) {
 					return graphUsage(), true
 				case "search":
 					return searchUsage(), true
+				case "links":
+					return linksUsage(), true
 				}
 			}
 			return usage(), true
