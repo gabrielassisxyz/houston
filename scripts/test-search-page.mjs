@@ -6,6 +6,16 @@
 // which sets a real notesServiceUrl on the isolated server.
 import assert from "node:assert/strict";
 import { chromium } from "playwright";
+import { obsidianLink } from "../lib/obsidian-link.ts";
+
+// The vault name is encoded as strictly as the path: a name holding `&` or `#`
+// would otherwise end the vault parameter early. The browser fixtures name a
+// vault with a space only, which every encoder writes the same way.
+assert.equal(
+  obsidianLink("Trabalho & Notas #1", "a b.md"),
+  "obsidian://open?vault=Trabalho%20%26%20Notas%20%231&file=a%20b.md",
+  "a vault name with & and # is encoded with encodeURIComponent",
+);
 
 const base = process.env.SCOTTY_TEST_URL;
 assert.ok(base, "Set SCOTTY_TEST_URL to an isolated server started from the current build");
