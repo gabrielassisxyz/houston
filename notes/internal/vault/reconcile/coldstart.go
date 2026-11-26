@@ -33,6 +33,12 @@ import (
 // strict no-op: no revisions are added, no cache rows are mutated, no UUID is
 // re-injected.
 func (r *Reconciler) ColdStart(ctx context.Context) error {
+	// Before the walk, so every link the walk resolves finds its note through
+	// the base_key index rather than by reading each keyless row.
+	if err := fillMissingBaseKeys(ctx, r.g); err != nil {
+		return fmt.Errorf("coldstart: %w", err)
+	}
+
 	// --- Phase 1: snapshot the stored cache ---
 	// Build uuid → cachedPathEntry map from note_paths.
 	cached, err := listAllCachedPaths(ctx, r.g)
@@ -125,6 +131,38 @@ func (r *Reconciler) ColdStart(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// fillMissingBaseKeys writes base_key, in one transaction, for every
+// note_paths row that has none: the rows written before migration 0011 added
+// the column. upsertInTx keys every row it writes, and an unchanged note never
+// reaches it, so without this its row would stay keyless.
+func fillMissingBaseKeys(ctx context.Context, g *graph.Graph) error {
+	return g.DoWrite(ctx, func(tx *graph.WriteTx) error {
+		rows, err := tx.Query(`SELECT uuid, path FROM note_paths WHERE base_key IS NULL`)
+		if err != nil {
+			return fmt.Errorf("fill base keys: %w", err)
+		}
+		var keyless []cachedPathEntry
+		for rows.Next() {
+			var e cachedPathEntry
+			if err := rows.Scan(&e.uuid, &e.path); err != nil {
+				rows.Close()
+				return fmt.Errorf("fill base keys: scan: %w", err)
+			}
+			keyless = append(keyless, e)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("fill base keys: %w", err)
+		}
+		for _, e := range keyless {
+			if _, err := tx.Exec(`UPDATE note_paths SET base_key = ? WHERE uuid = ?`, baseKey(e.path), e.uuid); err != nil {
+				return fmt.Errorf("fill base key uuid=%q: %w", e.uuid, err)
+			}
+		}
+		return nil
+	})
 }
 
 // reconcileFile classifies and acts on one on-disk .md file.
