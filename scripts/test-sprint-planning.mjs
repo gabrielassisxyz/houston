@@ -81,6 +81,9 @@ async function openScenario({ url = `/sprints/${ID}`, sprints = [sprint(ID)], be
       target.labels = [...target.labels.filter((l) => !body.remove.includes(l)), ...body.add];
       return route.fulfill({ json: target });
     }
+    if (path === "/api/capabilities") {
+      return route.fulfill({ json: { workDashboardUrl: null, chain: false, notes: false, obsidianVault: null } });
+    }
     state.unrouted.push(`${method} ${path}`);
     return route.fulfill({ json: {} });
   });

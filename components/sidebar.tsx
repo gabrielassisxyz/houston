@@ -12,7 +12,7 @@ import { useResizableWidth } from "@/hooks/use-resizable-width";
 import { cn } from "@/lib/utils";
 import { navViews, type ViewNavItem } from "@/lib/views";
 import { Sheet, SheetContent, SheetDescription, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
-import { Briefcase, Menu } from "lucide-react";
+import { Briefcase, Menu, Search } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useCapabilities } from "@/hooks/use-capabilities";
@@ -59,7 +59,10 @@ export function Sidebar({
   const viewList = views ?? navViews(!!meta?.gamification);
   const showViews = viewList.length > 0;
   const showWork = !!workUrl;
+  const showSearch = caps.data?.notes === true;
+  const showDestinations = showWork || showSearch;
   const workActive = pathname === "/work";
+  const searchActive = pathname === "/search";
 
   return (
     <aside
@@ -121,25 +124,43 @@ export function Sidebar({
             })}
           </div>
         ) : null}
-        {showViews && showWork ? (
+        {showViews && showDestinations ? (
           <div aria-hidden="true" className="mx-2 my-1 border-t border-border" />
         ) : null}
-        {showWork ? (
+        {showDestinations ? (
           <div data-nav-group="destinations" className="flex flex-col gap-[2px]">
-            <Link
-              href="/work"
-              aria-current={workActive ? "page" : undefined}
-              onClick={() => onProjectNavigate?.()}
-              className={cn(
-                "flex w-full items-center gap-[10px] rounded-[9px] px-[10px] py-2 text-left text-[13.5px] transition-colors",
-                workActive
-                  ? "bg-[var(--brand-weak)] font-semibold text-[var(--brand)]"
-                  : "font-medium text-[var(--text-2)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]",
-              )}
-            >
-              <Briefcase size={17} className="flex-shrink-0" aria-hidden="true" />
-              <span className="flex-1">Trabalho</span>
-            </Link>
+            {showWork ? (
+              <Link
+                href="/work"
+                aria-current={workActive ? "page" : undefined}
+                onClick={() => onProjectNavigate?.()}
+                className={cn(
+                  "flex w-full items-center gap-[10px] rounded-[9px] px-[10px] py-2 text-left text-[13.5px] transition-colors",
+                  workActive
+                    ? "bg-[var(--brand-weak)] font-semibold text-[var(--brand)]"
+                    : "font-medium text-[var(--text-2)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]",
+                )}
+              >
+                <Briefcase size={17} className="flex-shrink-0" aria-hidden="true" />
+                <span className="flex-1">Trabalho</span>
+              </Link>
+            ) : null}
+            {showSearch ? (
+              <Link
+                href="/search"
+                aria-current={searchActive ? "page" : undefined}
+                onClick={() => onProjectNavigate?.()}
+                className={cn(
+                  "flex w-full items-center gap-[10px] rounded-[9px] px-[10px] py-2 text-left text-[13.5px] transition-colors",
+                  searchActive
+                    ? "bg-[var(--brand-weak)] font-semibold text-[var(--brand)]"
+                    : "font-medium text-[var(--text-2)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]",
+                )}
+              >
+                <Search size={17} className="flex-shrink-0" aria-hidden="true" />
+                <span className="flex-1">Busca</span>
+              </Link>
+            ) : null}
           </div>
         ) : null}
       </nav>

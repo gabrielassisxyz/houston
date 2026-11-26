@@ -132,6 +132,9 @@ async function openScenario(url, { failed = [] } = {}) {
       return route.fulfill({ json: { beads: state.beads, meta: metaFor(state.failed) } });
     }
     if (path.endsWith("/order")) return route.fulfill({ json: { orders: {} } });
+    if (path === "/api/capabilities") {
+      return route.fulfill({ json: { workDashboardUrl: null, chain: false, notes: false, obsidianVault: null } });
+    }
     state.unrouted.push(path);
     return route.fulfill({ json: {} });
   });
