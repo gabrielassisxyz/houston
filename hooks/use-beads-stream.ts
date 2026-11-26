@@ -26,6 +26,7 @@ export function useBeadsStream(projectId: string): { live: boolean } {
     es.addEventListener("change", () => {
       qc.invalidateQueries({ queryKey: beadsKey(projectId) });
       qc.invalidateQueries({ queryKey: activityKey(projectId) });
+      qc.invalidateQueries({ queryKey: ["chain", projectId] });
     });
 
     return () => {

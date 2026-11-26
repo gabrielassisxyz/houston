@@ -6,7 +6,9 @@ import { useApp } from "@/components/app-context";
 import { ProjectChip } from "@/components/project-chip";
 import { useUrlFilters } from "@/hooks/use-url-filters";
 import type { Bead } from "@/lib/schema";
-import { displayId } from "@/lib/aggregate";
+import { ALL_PROJECT_ID, displayId, projectOf } from "@/lib/aggregate";
+import { ChainSection } from "@/components/chain-section";
+import { useCapabilities } from "@/hooks/use-capabilities";
 import { beadOrigin, originTitle } from "@/lib/attribution";
 import {
   catColor,
@@ -71,7 +73,9 @@ export function EpicsView({
     selectedBeadId,
     selectBead,
     readOnly,
+    projectId,
   } = useApp();
+  const caps = useCapabilities();
   const [expanded, setExpanded] = React.useState<Record<string, boolean>>({});
   const [hideClosed, setHideClosed] = React.useState(true);
   // The URL's `q`, shared with the Board and List search. Their facet filters do not apply here.
@@ -387,6 +391,17 @@ export function EpicsView({
                       <Icon name="plus" size={14} />
                       <span>Add child to this epic</span>
                     </button>
+                    {(() => {
+                      const chainProject = projectOf(e)?.id ?? projectId;
+                      const chainLocalId = displayId(e);
+                      if (caps.data?.chain !== true && caps.data?.notes !== true) return null;
+                      if (chainProject === ALL_PROJECT_ID) return null;
+                      return (
+                        <div className="m-[2px] rounded-[9px] bg-[var(--surface)] p-[9px_12px]">
+                          <ChainSection projectId={chainProject} beadId={chainLocalId} />
+                        </div>
+                      );
+                    })()}
                   </div>
                 )}
               </section>

@@ -24,6 +24,7 @@ export function useAllBeadsStream(): void {
     const es = new EventSource(ALL_BEADS_STREAM_URL);
     es.addEventListener("change", () => {
       qc.invalidateQueries({ queryKey: allBeadsKey });
+      qc.invalidateQueries({ queryKey: ["chain"] });
     });
     return () => es.close();
   }, [qc]);

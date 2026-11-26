@@ -80,6 +80,9 @@ async function openScenario({ sprintRecord = sprint(), beads = [], failed = [], 
     }
     if (path === `/api/sprints/${ID}/start` && method === "POST") return onStart(route, state);
     if (path === `/api/sprints/${ID}/close` && method === "POST") return onClose(route, state);
+    if (path === "/api/capabilities") {
+      return route.fulfill({ json: { workDashboardUrl: null, chain: false, notes: false, obsidianVault: null } });
+    }
     state.requests.push(`UNROUTED ${method} ${path}`);
     return route.fulfill({ json: {} });
   });

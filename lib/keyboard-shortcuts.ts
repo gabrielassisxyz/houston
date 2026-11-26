@@ -37,6 +37,7 @@ export const KEYBOARD_SHORTCUT_GROUPS: KeyboardShortcutGroup[] = [
       { keys: ["?"], label: "Show keyboard shortcuts" },
       { keys: ["⌘/Ctrl", "K"], label: "Open the command palette" },
       { keys: ["/"], label: "Focus search" },
+      { keys: ["⌘/Ctrl", "Shift", "F"], label: "Search notes" },
       { keys: ["⌘/Ctrl", "Enter"], label: "Submit the focused text field" },
       { keys: ["N"], label: "Create an issue" },
       { keys: ["T"], label: "Toggle light / dark theme" },

@@ -101,8 +101,12 @@ export function useSetStatus() {
       }
       toastError(err);
     },
-    onSettled: (_answer, _err, _vars, ctx) =>
-      ctx ? qc.invalidateQueries({ queryKey: ctx.key }) : undefined,
+    onSettled: (_answer, _err, _vars, ctx) => {
+      if (!ctx) return undefined;
+      qc.invalidateQueries({ queryKey: ctx.key });
+      qc.invalidateQueries({ queryKey: ["chain", String(ctx.key[1])] });
+      return undefined;
+    },
   });
 }
 
@@ -119,6 +123,7 @@ function mutationToast<TArgs, TRes>(
       const reconciled = reconcileAnswer(qc, String(key[1]), res);
       toast.success(message(args, res));
       qc.invalidateQueries({ queryKey: key });
+      qc.invalidateQueries({ queryKey: ["chain", String(key[1])] });
       return reconciled;
     },
     onError: (err: unknown) => toastError(err),

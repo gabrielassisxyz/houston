@@ -91,6 +91,9 @@ async function openScenario({ sprints = [], beads = [], failed = [], readOnly = 
       state.sprints = state.sprints.filter((s) => s.id !== id);
       return route.fulfill({ json: { ok: true } });
     }
+    if (path === "/api/capabilities") {
+      return route.fulfill({ json: { workDashboardUrl: null, chain: false, notes: false, obsidianVault: null } });
+    }
     state.unrouted.push(path);
     return route.fulfill({ json: {} });
   });

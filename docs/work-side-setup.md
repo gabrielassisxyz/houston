@@ -161,6 +161,71 @@ to be framed. `X-Frame-Options` cannot name one allowed origin (its values are `
 with `X-Frame-Options` removed for it. A check on the request's fetch-metadata headers is relaxed
 the same way, for that document load only.
 
+## Chain: stories, tickets and the delivery pipeline
+
+Houston ties a bead to the work-tracker story or ticket its `external_ref` names, to the epic it
+sits under or the beads under it, and to the delivery pipeline of its project's repository. The
+read routes and every answer shape are described in [chain.md](chain.md); this section is only
+the setup that feeds them.
+
+### The three chain keys
+
+Three global keys live beside `workDashboardUrl` in `config.json`:
+
+- `snapshotPath`: the absolute path of the snapshot file, starting with `/`, with no control
+  characters and no surrounding whitespace (for example `/path/to/snapshot.json`).
+- `serviceNowHost`: the bare ticket host name (for example `example.com`): at least two
+  dot-separated lowercase labels, letters and digits with hyphens only inside, the last label
+  holding at least one letter, and no scheme, port, path, query, fragment or user information.
+- `githubOrgs`: the list of lowercase GitHub owner names pipeline links may be built for (for
+  example `["org"]`); an empty list is valid and stored.
+
+Set them while Houston runs by sending only those keys to the config route:
+
+```bash
+curl -X PUT http://127.0.0.1:3300/api/config \
+  -H 'Content-Type: application/json' \
+  -d '{"snapshotPath": "/path/to/snapshot.json", "serviceNowHost": "example.com", "githubOrgs": ["org"]}'
+```
+
+An invalid value is refused with `invalid_config`; an invalid value found on disk at startup is
+ignored with a warning, exactly like `workDashboardUrl`. Clear a string key the same way with an
+empty string (`""`), which removes it like `null` does; clear the owner list with `null`. Any
+other field sent alongside is applied as well, so send only these keys when that is all that
+should change.
+
+Or stop the service first and edit the file, as the work-dashboard section above says:
+`launchctl bootout`, edit the existing JSON object without replacing the other fields,
+`launchctl bootstrap`. Setting `snapshotPath` also turns the chain on: the capabilities answer
+reports it, and the chain UI reads through it.
+
+### The snapshot file
+
+A local collector program on the work machine writes the snapshot file Houston reads at
+`snapshotPath`. The file is JSON with `schema_version` 1 and a `sources` object: the ticket
+sources (`incidents`, `changes`, `work_tracker_stories`, `work_tracker_bugs`,
+`work_tracker_tasks`, `work_tracker_subtasks`, `ritms`), plus `approvals` and `pipeline`.
+Houston reads the configured path on demand and parses it again only when the file changed; when
+the path is unset or the file cannot be read, the chain answers carry the reason instead of
+tracker and pipeline data. Point `snapshotPath` at the absolute path where the collector writes
+that file.
+
+### References on beads
+
+An epic carries the story number as its reference (for example `STRY00000001`); any other bead
+carries its task or bug number (for example `INC00000001`, `CHG00000001`). The reference is typed
+in the bead drawer, trimmed and matched without regard to case, at most 128 characters and with
+no control characters. The same reference cannot sit on two beads of one repository: `br`
+refuses the second write.
+
+### The pipeline repository
+
+Each project names at most one pipeline repository as `owner/name` in lowercase (for example
+`org/repo-a`), kept on the project entry rather than in the global keys. Set it in Settings, in
+the project card's pipeline field, or through `PATCH /api/projects/[id]` with
+`{"pipelineRepo": "org/repo-a"}`. Saving an empty string clears it. Only a project that names
+one carries a pipeline part, built from the snapshot's pipeline records for that repository.
+
 ## Notes service
 
 The notes service indexes the work vault and serves it over loopback on `127.0.0.1`. One install
