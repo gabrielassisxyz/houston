@@ -492,4 +492,16 @@ const byKey = (...keys) => fixtureRecords().filter((r) => keys.includes(r.key));
   assert.deepEqual(chain.notes.linked.map((l) => l.id), ['l-a', 'l-b', 'l-common'], 'merged linked survives resolveChain');
 }
 
+// Two batches that together link 25 distinct notes: the merge keeps the first 20 by path
+// and counts the 5 it cut on top of what each batch had already omitted.
+{
+  const linkedNote = (n) => ({ id: `l-${n}`, title: `L${n}`, path: `l/${String(n).padStart(2, '0')}.md`, kind: 'nota', tags: [] });
+  const batchA = { notes: [], linked: Array.from({ length: 13 }, (_, i) => linkedNote(i)), linkedOmitted: 1 };
+  const batchB = { notes: [], linked: Array.from({ length: 12 }, (_, i) => linkedNote(i + 13)), linkedOmitted: 2 };
+  const merged = mergeNotesAnswers([batchA, batchB]);
+  assert.equal(merged.linked.length, 20, 'linked cut to 20 across batches');
+  assert.equal(merged.linked[19].id, 'l-19', 'the cut keeps the first 20 by path');
+  assert.equal(merged.linkedOmitted, 8, 'omitted is each batch’s omissions plus the 5 cut');
+}
+
 console.log('test-chain: ok');
