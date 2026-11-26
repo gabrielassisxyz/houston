@@ -60,7 +60,14 @@ async function openScenario(url, { width = 1500, readOnly = false, storedWidth, 
     if (request.method() !== "GET") return route.fulfill({ status: 500, json: { error: `unexpected ${request.method()} ${path}` } });
     if (path === "/api/capabilities") {
       state.capsAnswers += 1;
-      return route.fulfill({ json: { workDashboardUrl: configured ? workUrl : null } });
+      return route.fulfill({
+        json: {
+          workDashboardUrl: configured ? workUrl : null,
+          chain: false,
+          notes: configured,
+          obsidianVault: null,
+        },
+      });
     }
     if (path === "/api/viewer-mode") {
       state.viewerAnswers += 1;
@@ -260,7 +267,10 @@ try {
   await card("alpha:a-1").waitFor();
   const trabalho = page.getByRole("link", { name: "Trabalho", exact: true });
   await trabalho.waitFor();
+  const busca = page.getByRole("link", { name: "Busca", exact: true });
+  await busca.waitFor();
   assert.equal(await page.locator("nav").getByRole("link", { name: "Trabalho", exact: true }).count(), 1, "the Trabalho link sits inside the navigation landmark");
+  assert.equal(await page.locator("nav").getByRole("link", { name: "Busca", exact: true }).count(), 1, "the Busca link sits inside the navigation landmark");
   const viewsGroup = page.locator('nav [data-nav-group="views"]');
   const destGroup = page.locator('nav [data-nav-group="destinations"]');
   assert.equal(await viewsGroup.count(), 1, "one views group");
@@ -272,10 +282,17 @@ try {
   );
   const groupOrder = await page.locator("nav [data-nav-group]").evaluateAll((els) => els.map((el) => el.getAttribute("data-nav-group")));
   assert.deepEqual(groupOrder, ["views", "destinations"], "the destinations group follows the views group");
-  assert.equal(await destGroup.getByRole("link").count(), 1, "Trabalho is the only item of the destinations group");
+  assert.equal(await destGroup.getByRole("link").count(), 2, "Trabalho and Busca are the items of the destinations group");
   assert.equal((await destGroup.getByRole("link", { name: "Trabalho", exact: true }).innerText()).trim(), "Trabalho", "the destinations item reads Trabalho");
+  assert.equal((await destGroup.getByRole("link", { name: "Busca", exact: true }).innerText()).trim(), "Busca", "the destinations item reads Busca");
   assert.equal(await trabalho.getAttribute("aria-current"), null, "no aria-current on /all");
-  await trabalho.click();
+  assert.equal(await busca.getAttribute("aria-current"), null, "no aria-current for Busca on /all");
+  await busca.click();
+  await page.waitForURL((url) => url.pathname === "/search");
+  assert.equal(await page.getByRole("link", { name: "Busca", exact: true }).getAttribute("aria-current"), "page", "aria-current on /search");
+  await page.goto(`${base}/all`);
+  await card("alpha:a-1").waitFor();
+  await page.getByRole("link", { name: "Trabalho", exact: true }).click();
   await page.waitForURL((url) => url.pathname === "/work");
   assert.equal(await page.getByRole("link", { name: "Trabalho", exact: true }).getAttribute("aria-current"), "page", "aria-current on /work");
   await scenario.context.close();
@@ -288,8 +305,10 @@ try {
   await sheet2.getByRole("button", { name: SWITCHER, exact: true }).waitFor();
   const sheetTrabalho = sheet2.getByRole("link", { name: "Trabalho", exact: true });
   await sheetTrabalho.waitFor();
-  await sheetTrabalho.click();
-  await page.waitForURL((url) => url.pathname === "/work");
+  const sheetBusca = sheet2.getByRole("link", { name: "Busca", exact: true });
+  await sheetBusca.waitFor();
+  await sheetBusca.click();
+  await page.waitForURL((url) => url.pathname === "/search");
   await sheet2.waitFor({ state: "hidden" });
   await scenario.context.close();
 
@@ -298,6 +317,7 @@ try {
   await card("alpha:a-1").waitFor();
   await eventually(() => scenario.state.capsAnswers > 0, "the capabilities read answered");
   assert.equal(await page.getByRole("link", { name: "Trabalho", exact: true }).count(), 0, "no Trabalho link when unconfigured");
+  assert.equal(await page.getByRole("link", { name: "Busca", exact: true }).count(), 0, "no Busca link when unconfigured");
   assert.equal(await page.locator('nav [data-nav-group="destinations"]').count(), 0, "no destinations group when unconfigured");
   await scenario.context.close();
 

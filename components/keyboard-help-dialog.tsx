@@ -1,7 +1,9 @@
 "use client";
 
+import * as React from "react";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { KEYBOARD_SHORTCUT_GROUPS } from "@/lib/keyboard-shortcuts";
+import { useCapabilities } from "@/hooks/use-capabilities";
 
 export function ShortcutKeys({ keys, sequence }: { keys: string[]; sequence?: boolean }) {
   return (
@@ -29,6 +31,18 @@ export function KeyboardHelpDialog({
   open: boolean;
   onOpenChangeAction: (open: boolean) => void;
 }) {
+  const caps = useCapabilities();
+  const showNotes = caps.data?.notes === true;
+  const groups = React.useMemo(
+    () =>
+      KEYBOARD_SHORTCUT_GROUPS.map((group) => ({
+        ...group,
+        shortcuts: group.shortcuts.filter(
+          (shortcut) => showNotes || shortcut.label !== "Search notes",
+        ),
+      })).filter((group) => group.shortcuts.length > 0),
+    [showNotes],
+  );
   return (
     <Dialog open={open} onOpenChange={onOpenChangeAction}>
       <DialogContent className="max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden border border-border bg-[var(--surface)] p-0 shadow-[var(--shadow-lg)] sm:max-w-[760px]">
@@ -40,7 +54,7 @@ export function KeyboardHelpDialog({
           </DialogDescription>
         </div>
         <div className="bd-scroll grid min-h-0 grid-cols-1 gap-6 overflow-y-auto px-6 py-5 md:grid-cols-2">
-          {KEYBOARD_SHORTCUT_GROUPS.map((group) => (
+          {groups.map((group) => (
             <section key={group.topic}>
               <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-[.08em] text-[var(--text-3)]">
                 {group.topic}

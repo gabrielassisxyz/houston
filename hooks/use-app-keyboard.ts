@@ -38,7 +38,7 @@ function isNativeControlActivation(target: EventTarget | null, key: string): boo
   return !!target.closest("button, a, input, textarea, select") && !target.matches(ITEM_SELECTOR);
 }
 
-function hasOpenOverlay(ignoreBeadDrawer = false): boolean {
+export function hasOpenOverlay(ignoreBeadDrawer = false): boolean {
   return Array.from(
     document.querySelectorAll(
       '[data-slot="dialog-content"], [data-slot="sheet-content"], [data-slot="dropdown-menu-content"], [data-slot="select-content"]',
