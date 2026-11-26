@@ -583,43 +583,51 @@ type diffSnapshotPayload struct {
 
 // lineDiff computes a minimal line-oriented forward diff from old to new.
 // Uses a simple LCS-based approach that produces "+" and "-" operations.
+//
+// The operations come in the order revisions.applyDiff replays them, and each
+// index points into the list as rebuilt so far, not into either body. While the
+// walk stands at old line i and new line j, that list is newLines[:j] followed
+// by oldLines[i:], so a "-" of oldLines[i] and a "+" of newLines[j] are both at
+// index j.
 func lineDiff(oldBody, newBody string) []lineDiffOp {
 	oldLines := splitLines(oldBody)
 	newLines := splitLines(newBody)
 
-	// Compute LCS table.
+	// Compute the LCS table over suffixes: lcs[i][j] is the length of the
+	// longest common subsequence of oldLines[i:] and newLines[j:], which lets
+	// the walk below go forward.
 	m, n := len(oldLines), len(newLines)
 	lcs := make([][]int, m+1)
 	for i := range lcs {
 		lcs[i] = make([]int, n+1)
 	}
-	for i := 1; i <= m; i++ {
-		for j := 1; j <= n; j++ {
-			if oldLines[i-1] == newLines[j-1] {
-				lcs[i][j] = lcs[i-1][j-1] + 1
+	for i := m - 1; i >= 0; i-- {
+		for j := n - 1; j >= 0; j-- {
+			if oldLines[i] == newLines[j] {
+				lcs[i][j] = lcs[i+1][j+1] + 1
 			} else {
-				if lcs[i-1][j] >= lcs[i][j-1] {
-					lcs[i][j] = lcs[i-1][j]
+				if lcs[i+1][j] >= lcs[i][j+1] {
+					lcs[i][j] = lcs[i+1][j]
 				} else {
-					lcs[i][j] = lcs[i][j-1]
+					lcs[i][j] = lcs[i][j+1]
 				}
 			}
 		}
 	}
 
-	// Backtrack to produce the diff ops.
+	// Walk forward to produce the diff ops.
 	var ops []lineDiffOp
-	i, j := m, n
-	for i > 0 || j > 0 {
-		if i > 0 && j > 0 && oldLines[i-1] == newLines[j-1] {
-			i--
-			j--
-		} else if j > 0 && (i == 0 || lcs[i][j-1] >= lcs[i-1][j]) {
-			ops = append(ops, lineDiffOp{Op: "+", Line: j - 1, Text: newLines[j-1]})
-			j--
-		} else if i > 0 {
-			ops = append(ops, lineDiffOp{Op: "-", Line: i - 1, Text: oldLines[i-1]})
-			i--
+	i, j := 0, 0
+	for i < m || j < n {
+		if i < m && j < n && oldLines[i] == newLines[j] {
+			i++
+			j++
+		} else if i < m && (j == n || lcs[i+1][j] >= lcs[i][j+1]) {
+			ops = append(ops, lineDiffOp{Op: "-", Line: j, Text: oldLines[i]})
+			i++
+		} else {
+			ops = append(ops, lineDiffOp{Op: "+", Line: j, Text: newLines[j]})
+			j++
 		}
 	}
 	return ops
