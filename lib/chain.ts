@@ -97,12 +97,75 @@ export type ChainPipeline =
   | { state: "absent" }
   | { state: "unconfirmed"; reason: string; issues?: ChainIssue[] };
 
+export type ChainNoteKind = "plano" | "implementacao" | "evidencia" | "nota";
+
+export type ChainDirectNote = {
+  id: string;
+  title: string;
+  path: string;
+  kind: ChainNoteKind;
+  tags: string[];
+  matchedRefs: string[];
+};
+
+export type ChainLinkedNote = {
+  id: string;
+  title: string;
+  path: string;
+  kind: ChainNoteKind;
+  tags: string[];
+};
+
+export type ChainNotes =
+  | {
+      state: "available";
+      plano: ChainDirectNote[];
+      implementacao: ChainDirectNote[];
+      evidencia: ChainDirectNote[];
+      nota: ChainDirectNote[];
+      linked: ChainLinkedNote[];
+      linkedOmitted: number;
+    }
+  | { state: "unavailable"; reason: string };
+
+/**
+ * The notes service's pinned refs answer, restated here so this module stays
+ * pure: importing `lib/notes-service.ts` would pull in `server-only` and break
+ * the pure test that loads this file without a build.
+ */
+export type ChainNotesInputNote = {
+  id: string;
+  title: string;
+  path: string;
+  kind: string;
+  tags: string[];
+  matchedRefs: string[];
+};
+
+export type ChainNotesInputLinked = {
+  id: string;
+  title: string;
+  path: string;
+  kind: string;
+  tags: string[];
+};
+
+export type ChainNotesInput = {
+  notes: ChainNotesInputNote[];
+  linked: ChainNotesInputLinked[];
+  linkedOmitted: number;
+};
+
+/** Identifiers are sent comma-joined, at most this many per refs call. */
+export const NOTES_BATCH_SIZE = 200;
+
 export type Chain = {
   bead: ChainBead;
   tracker: TrackerItem | null;
   descendants?: ChainDescendant[];
   epic?: ChainEpic | null;
   pipeline?: ChainPipeline;
+  notes?: ChainNotes;
   snapshot: { available: boolean; reason?: string };
 };
 
@@ -330,12 +393,169 @@ function pipelinePart(repo: string, read: ChainSnapshotInput, settings: LinkSett
   return { state: "absent" };
 }
 
+// --------------------------------------------------------------------------------- the notes
+
+function pushRefId(out: string[], seen: Set<string>, raw: string): void {
+  const trimmed = raw.trim();
+  if (trimmed === "" || trimmed.includes(",")) return;
+  const key = trimmed.toLowerCase();
+  if (seen.has(key)) return;
+  seen.add(key);
+  out.push(trimmed);
+}
+
+/**
+ * Every identifier the notes service should be asked about for `bead`: for an
+ * epic its id, every descendant's id and every `external_ref` among them; for
+ * any other bead its id and its `external_ref`, never its siblings'.
+ * De-duplicated without regard to case, keeping the first spelling. An
+ * identifier holding a comma is left out, because the refs route splits its
+ * `ids` list on commas.
+ */
+export function collectChainRefIds(bead: Bead, beads: Bead[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  if (bead.issue_type === "epic") {
+    const under = descendantsOf(bead.id, beads);
+    const group = [bead, ...under];
+    for (const entry of group) {
+      if (typeof entry.id === "string") pushRefId(out, seen, entry.id);
+    }
+    for (const entry of group) {
+      const ref = externalRefOf(entry);
+      if (ref !== undefined) pushRefId(out, seen, ref);
+    }
+    return out;
+  }
+  if (typeof bead.id === "string") pushRefId(out, seen, bead.id);
+  const ref = externalRefOf(bead);
+  if (ref !== undefined) pushRefId(out, seen, ref);
+  return out;
+}
+
+function normaliseKind(raw: string): ChainNoteKind {
+  if (raw === "plano" || raw === "implementacao" || raw === "evidencia" || raw === "nota") return raw;
+  return "nota";
+}
+
+function byPath(a: { path: string }, b: { path: string }): number {
+  if (a.path < b.path) return -1;
+  if (a.path > b.path) return 1;
+  return 0;
+}
+
+function normaliseDirect(note: ChainNotesInputNote): ChainDirectNote {
+  const tags = [...(note.tags ?? [])].sort();
+  const matched = [...new Set(note.matchedRefs ?? [])].sort();
+  return {
+    id: note.id,
+    title: note.title,
+    path: note.path,
+    kind: normaliseKind(note.kind),
+    tags,
+    matchedRefs: matched,
+  };
+}
+
+function normaliseLinked(note: ChainNotesInputLinked): ChainLinkedNote {
+  return {
+    id: note.id,
+    title: note.title,
+    path: note.path,
+    kind: normaliseKind(note.kind),
+    tags: [...(note.tags ?? [])].sort(),
+  };
+}
+
+/**
+ * Merges the refs answers of several batches into one, following the
+ * Specification: direct notes merged by id with their `matchedRefs` joined,
+ * direct notes dropped from the merged `linked`, `linked` de-duplicated by id,
+ * sorted by path and cut to 20, and `linkedOmitted` the sum of each batch's
+ * `linkedOmitted` plus what the cut removed.
+ */
+export function mergeNotesAnswers(batches: readonly ChainNotesInput[]): ChainNotesInput {
+  const directById = new Map<string, ChainNotesInputNote>();
+  const directOrder: string[] = [];
+  let omitted = 0;
+  const linkedById = new Map<string, ChainNotesInputLinked>();
+  for (const batch of batches) {
+    omitted += batch.linkedOmitted ?? 0;
+    for (const note of batch.notes ?? []) {
+      const prev = directById.get(note.id);
+      if (!prev) {
+        directById.set(note.id, {
+          ...note,
+          tags: [...(note.tags ?? [])],
+          matchedRefs: [...(note.matchedRefs ?? [])],
+        });
+        directOrder.push(note.id);
+      } else {
+        const joined = [...(prev.matchedRefs ?? []), ...(note.matchedRefs ?? [])];
+        prev.matchedRefs = [...new Set(joined)].sort();
+        const tags = new Set([...(prev.tags ?? []), ...(note.tags ?? [])]);
+        prev.tags = [...tags].sort();
+      }
+    }
+    for (const note of batch.linked ?? []) {
+      if (!linkedById.has(note.id)) {
+        linkedById.set(note.id, { ...note, tags: [...(note.tags ?? [])] });
+      }
+    }
+  }
+  const directIds = new Set(directById.keys());
+  const mergedLinked = [...linkedById.values()].filter((note) => !directIds.has(note.id)).sort(byPath);
+  const cut = mergedLinked.slice(0, 20);
+  omitted += mergedLinked.length - cut.length;
+  const mergedDirect = directOrder
+    .map((id) => directById.get(id))
+    .filter((note): note is ChainNotesInputNote => note !== undefined)
+    .sort(byPath);
+  return { notes: mergedDirect, linked: cut, linkedOmitted: omitted };
+}
+
+/**
+ * Groups one (already merged) refs answer the way `resolveChain` stores it:
+ * direct notes by `kind`, then `linked` and `linkedOmitted`. An unknown kind
+ * reads as `nota`.
+ */
+export function groupNotesAnswer(answer: ChainNotesInput): {
+  plano: ChainDirectNote[];
+  implementacao: ChainDirectNote[];
+  evidencia: ChainDirectNote[];
+  nota: ChainDirectNote[];
+  linked: ChainLinkedNote[];
+  linkedOmitted: number;
+} {
+  const plano: ChainDirectNote[] = [];
+  const implementacao: ChainDirectNote[] = [];
+  const evidencia: ChainDirectNote[] = [];
+  const nota: ChainDirectNote[] = [];
+  for (const raw of answer.notes ?? []) {
+    const note = normaliseDirect(raw);
+    if (note.kind === "plano") plano.push(note);
+    else if (note.kind === "implementacao") implementacao.push(note);
+    else if (note.kind === "evidencia") evidencia.push(note);
+    else nota.push(note);
+  }
+  return {
+    plano,
+    implementacao,
+    evidencia,
+    nota,
+    linked: (answer.linked ?? []).map(normaliseLinked),
+    linkedOmitted: answer.linkedOmitted ?? 0,
+  };
+}
+
 // ------------------------------------------------------------------------------- the chain
 
 /**
  * Resolves the chain of `bead` among `beads`, every bead of its project. An epic carries the
  * beads under it at any depth; any other bead carries its nearest enclosing epic. The pipeline
- * part is there only when the project names a pipeline repository.
+ * part is there only when the project names a pipeline repository. When `notesAnswer` is given,
+ * a `notes` part is added with the direct notes grouped by kind, then `linked` and
+ * `linkedOmitted`.
  */
 export function resolveChain(
   bead: Bead,
@@ -343,6 +563,7 @@ export function resolveChain(
   project: ChainProject,
   read: ChainSnapshotInput,
   settings: LinkSettings,
+  notesAnswer?: ChainNotesInput,
 ): Chain {
   const externalRef = externalRefOf(bead);
   const hierarchy =
@@ -350,6 +571,7 @@ export function resolveChain(
       ? { descendants: descendantsOf(bead.id, beads).map((under) => descendantPart(under, read, settings)) }
       : { epic: epicPart(enclosingEpic(bead, makeIndex(beads)), read, settings) };
   const pipeline = project.pipelineRepo ? { pipeline: pipelinePart(project.pipelineRepo, read, settings) } : {};
+  const notes = notesAnswer ? { notes: { state: "available" as const, ...groupNotesAnswer(notesAnswer) } } : {};
   return {
     bead: {
       id: bead.id,
@@ -362,6 +584,7 @@ export function resolveChain(
     tracker: trackerItem(externalRef, read, settings),
     ...hierarchy,
     ...pipeline,
+    ...notes,
     snapshot: read.available ? { available: true } : { available: false, reason: read.reason },
   };
 }
