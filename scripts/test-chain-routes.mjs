@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -78,6 +79,17 @@ try {
   await patchProject(aId, { pipelineRepo: 'org/repo-a' });
   await patchProject(bId, { pipelineRepo: 'org/repo-a' });
   await putConfig({ snapshotPath: copy, serviceNowHost: 'example.com', githubOrgs: ['org'] });
+
+  // Without a notes service the chain carries no notes part.
+  {
+    const { body } = await get(`/api/p/${aId}/beads/${epicA}/chain`);
+    assert.ok(!('notes' in body), 'unconfigured: no notes part');
+    const links = await get(`/api/links/${STRY}`);
+    assert.ok(!('notes' in links.body), 'unconfigured links: no top-level notes');
+    for (const entry of links.body.beads.filter((e) => [aId, bId].includes(e.projectId))) {
+      assert.ok(!('notes' in entry.chain), 'unconfigured links: no notes in a bead chain');
+    }
+  }
 
   // The chain of the epic and of the grandchild, with the shape and states of
   // the resolver and their links.
@@ -163,6 +175,89 @@ try {
     assert.equal(own(body).length, 2, 'the others are still answered');
   }
 
+  // With a stub notes service on 127.0.0.1 port 0: the chain gains its
+  // notes, the links gain per-bead notes and a top-level notes, including an
+  // identifier no bead carries. Then with it stopped, every notes part reads
+  // unavailable and everything else is unchanged.
+  const stubRequests = [];
+  const stub = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://127.0.0.1');
+    stubRequests.push({ path: url.pathname, ids: url.searchParams.get('ids'), hop: url.searchParams.get('hop') });
+    if (url.pathname !== '/api/notes/refs') {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'no fixture' }));
+      return;
+    }
+    const ids = (url.searchParams.get('ids') ?? '').split(',').map((s) => s.trim()).filter((s) => s !== '');
+    const first = ids[0] ?? 'unknown';
+    const answer = {
+      notes: [
+        { id: 'stub-plano', title: 'Stub plan', path: 'plans/stub.md', kind: 'plano', tags: [], matchedRefs: [first] },
+        { id: 'stub-nota', title: 'Stub note', path: 'notes/stub.md', kind: 'nota', tags: ['t'], matchedRefs: [first] },
+      ],
+      linked: [{ id: 'stub-linked', title: 'Stub linked', path: 'linked/stub.md', kind: 'evidencia', tags: [] }],
+      linkedOmitted: 0,
+    };
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(answer));
+  });
+  await new Promise((resolve) => stub.listen(0, '127.0.0.1', resolve));
+  const stubUrl = `http://127.0.0.1:${stub.address().port}/`;
+  try {
+    await putConfig({ notesServiceUrl: stubUrl });
+    {
+      const { body } = await get(`/api/p/${aId}/beads/${epicA}/chain`);
+      assert.equal(body.notes?.state, 'available', 'stub: chain notes available');
+      assert.equal(body.notes.plano[0]?.id, 'stub-plano', 'stub: plano grouped');
+      assert.equal(body.notes.nota[0]?.id, 'stub-nota', 'stub: nota grouped');
+      assert.deepEqual(body.notes.implementacao, [], 'stub: empty implementacao');
+      assert.deepEqual(body.notes.evidencia, [], 'stub: no direct evidencia');
+      assert.equal(body.notes.linked[0]?.id, 'stub-linked', 'stub: linked');
+      assert.equal(body.notes.linkedOmitted, 0, 'stub: linkedOmitted');
+      assert.equal(body.tracker.state, 'found', 'stub: tracker unchanged');
+      assert.equal(body.pipeline.state, 'found', 'stub: pipeline unchanged');
+    }
+    {
+      const { body } = await get(`/api/links/${STRY}`);
+      assert.equal(body.notes?.state, 'available', 'stub links: top-level notes available');
+      assert.equal(body.notes.plano[0]?.id, 'stub-plano', 'stub links: top-level plano');
+      for (const entry of own(body)) {
+        assert.equal(entry.chain.notes?.state, 'available', 'stub links: per-bead notes available');
+      }
+      assert.equal(body.ticket.state, 'found', 'stub links: ticket unchanged');
+    }
+    {
+      const { body } = await get('/api/links/INC00000001');
+      assert.deepEqual(own(body), [], 'stub: still no bead carries the incident');
+      assert.equal(body.notes?.state, 'available', 'stub: an identifier no bead carries still returns its notes');
+      assert.equal(body.notes.plano[0]?.id, 'stub-plano', 'stub: top-level plano for the carried identifier');
+    }
+    assert.ok(stubRequests.length > 0, 'the stub was called');
+    for (const r of stubRequests) {
+      assert.equal(r.path, '/api/notes/refs', 'the hub calls the refs route');
+      assert.equal(r.hop, '1', 'the hub calls with hop=1');
+      assert.ok((r.ids ?? '').split(',').length <= 200, 'the hub batches at most 200 identifiers');
+    }
+  } finally {
+    stub.closeAllConnections();
+    await new Promise((resolve) => stub.close(resolve));
+  }
+  // With the stub stopped the chain still answers, saying the notes are
+  // unavailable, and everything else is unchanged.
+  {
+    const { body } = await get(`/api/p/${aId}/beads/${epicA}/chain`);
+    assert.equal(body.notes?.state, 'unavailable', 'stopped: chain notes unavailable');
+    assert.ok(typeof body.notes?.reason === 'string' && body.notes.reason.length > 0, 'stopped: the reason says why');
+    assert.equal(body.tracker.state, 'found', 'stopped: tracker unchanged');
+    assert.equal(body.pipeline.state, 'found', 'stopped: pipeline unchanged');
+    const links = await get(`/api/links/${STRY}`);
+    assert.equal(links.body.notes?.state, 'unavailable', 'stopped links: top-level unavailable');
+    for (const entry of own(links.body)) {
+      assert.equal(entry.chain.notes?.state, 'unavailable', 'stopped links: per-bead unavailable');
+    }
+  }
+  await putConfig({ notesServiceUrl: '' });
+
   // Rewriting the copy atomically: the next answer reflects it.
   {
     const doc = JSON.parse(fs.readFileSync(copy, 'utf8'));
@@ -219,6 +314,6 @@ try {
   console.log('PASS (server): chain and links over real br trackers');
 } finally {
   for (const id of registered) await fetch(`${base}/api/projects/${id}`, { method: 'DELETE' }).catch(() => {});
-  await putConfig({ snapshotPath: '', serviceNowHost: '', githubOrgs: null });
+  await putConfig({ snapshotPath: '', serviceNowHost: '', githubOrgs: null, notesServiceUrl: '' });
   for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
 }
