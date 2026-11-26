@@ -21,6 +21,12 @@ const (
 	ReportEmptyFile ReportKind = "empty_file"
 )
 
+// ReportKinds lists every kind of report, so a caller can count each one,
+// zero included.
+func ReportKinds() []ReportKind {
+	return []ReportKind{ReportDuplicateID, ReportEmptyFile, ReportInvalidUTF8, ReportUnknownPermission}
+}
+
 // FileReport is one reason, for one file. Path is vault-relative.
 type FileReport struct {
 	Path   string     `json:"path"`

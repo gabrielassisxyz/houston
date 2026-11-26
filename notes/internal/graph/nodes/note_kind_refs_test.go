@@ -296,8 +296,8 @@ func TestHouOc517Migration0009AppliesFreshAndFrom0008(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	// Fresh: Up applies 0009.
-	if err := r.Up(ctx); err != nil {
+	// Fresh: up to 0009, so the Down below undoes 0009 whatever comes after it.
+	if err := r.UpTo(ctx, 9); err != nil {
 		t.Fatalf("Up fresh: %v", err)
 	}
 	ver, dirty, err := r.Current(ctx)
@@ -316,7 +316,7 @@ func TestHouOc517Migration0009AppliesFreshAndFrom0008(t *testing.T) {
 
 	// From 0008: Down once (9->8), then Up again.
 	if err := r.Down(ctx); err != nil {
-		t.Fatalf("Down from head: %v", err)
+		t.Fatalf("Down from 0009: %v", err)
 	}
 	ver, _, err = r.Current(ctx)
 	if err != nil {

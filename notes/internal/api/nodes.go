@@ -9,13 +9,19 @@ import (
 )
 
 // listNodesHandler answers GET /api/nodes, the only route this package takes
-// from kernl's chat.go.
+// from kernl's chat.go. It pages on request (limit, offset), in id order.
 func listNodesHandler(g *graph.Graph) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+		p, err := parsePage(r.URL.Query())
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		clause, args := p.sqlClause()
 		var out []map[string]any
-		err := g.DoRead(ctx, func(tx *graph.ReadTx) error {
-			rows, err := tx.Query(`SELECT id, title, type FROM nodes WHERE deleted_at IS NULL`)
+		err = g.DoRead(ctx, func(tx *graph.ReadTx) error {
+			rows, err := tx.Query(`SELECT id, title, type FROM nodes WHERE deleted_at IS NULL ORDER BY id`+clause, args...)
 			if err != nil {
 				return err
 			}

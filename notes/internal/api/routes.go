@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/gabrielassisxyz/houston/notes/internal/graph"
+	"github.com/gabrielassisxyz/houston/notes/internal/vault"
 )
 
 // Deps is everything the notes routes read.
@@ -24,6 +25,16 @@ type Deps struct {
 	Graph *graph.Graph
 	// VaultRoot is the directory the vault routes read, write and delete in.
 	VaultRoot string
+	// Vault is the vault service whose readiness health reports. Nil leaves
+	// health with its three fields.
+	Vault VaultStatus
+}
+
+// VaultStatus is the part of the vault service health reads. The server
+// answers before the first index completes, so this is what tells a client
+// whether the index is whole yet.
+type VaultStatus interface {
+	Status() vault.Status
 }
 
 // ErrEmptyVaultRoot refuses a registration that names no vault. kernl fell back
@@ -38,7 +49,7 @@ func Register(mux *http.ServeMux, d Deps) error {
 		return ErrEmptyVaultRoot
 	}
 
-	mux.HandleFunc("GET /api/health", healthHandler(d.VaultRoot))
+	mux.HandleFunc("GET /api/health", healthHandler(d))
 	mux.HandleFunc("GET /api/nodes", listNodesHandler(d.Graph))
 	registerVaultRoutes(mux, d)
 	registerNotesRoutes(mux, d)
@@ -53,19 +64,32 @@ func Register(mux *http.ServeMux, d Deps) error {
 
 // healthHandler reports liveness plus the configured vault location, so the
 // shell footer can show where the active vault lives instead of a placeholder.
+// With a vault service it adds readiness: indexing, true until the first index
+// has returned, and reports, the count of each kind of file report - files the
+// index left out, or indexed with something other than what they say.
 //
 // kernl encodes a map[string]string. A map[string]any encodes these three
 // string fields to the same bytes, and lets a readiness report add its own
 // fields beside them without replacing these.
-func healthHandler(vaultRoot string) http.HandlerFunc {
+func healthHandler(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
+		body := map[string]any{
+			"status":     "ok",
+			"vaultRoot":  d.VaultRoot,
+			"vaultLabel": vaultDisplayPath(d.VaultRoot),
+		}
+		if d.Vault != nil {
+			st := d.Vault.Status()
+			reports := make(map[string]int, len(st.Reports))
+			for kind, n := range st.Reports {
+				reports[string(kind)] = n
+			}
+			body["indexing"] = st.Indexing
+			body["reports"] = reports
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"status":     "ok",
-			"vaultRoot":  vaultRoot,
-			"vaultLabel": vaultDisplayPath(vaultRoot),
-		})
+		_ = json.NewEncoder(w).Encode(body)
 	}
 }
 

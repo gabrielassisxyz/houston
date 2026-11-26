@@ -12,12 +12,18 @@ import (
 )
 
 // Diff constants for Note body revision storage.
-// A line diff is stored when both old and new bodies are ≤ MaxDiffBytes
-// and the change ratio (|old-new| / max(old,new,1)) ≤ MaxChangeRatio.
+// A line diff is stored when both old and new bodies are ≤ MaxDiffBytes,
+// the change ratio (|old-new| / max(old,new,1)) ≤ MaxChangeRatio, and the
+// line counts multiply to at most MaxDiffCells.
 // Otherwise a full snapshot is stored tagged with kind="snapshot".
 const (
 	MaxDiffBytes   = 256 * 1024 // 256 KiB
 	MaxChangeRatio = 0.5        // 50% of the larger body
+	// MaxDiffCells caps the LCS table lineDiff builds, one int per cell: four
+	// million cells is about 32 MB. A body of five thousand short lines fits
+	// under MaxDiffBytes and would need 25 million cells, about 200 MB, on
+	// every edit.
+	MaxDiffCells = 4_000_000
 )
 
 // Origin says where a note CAME FROM. It is a separate axis from author, which says
@@ -517,8 +523,17 @@ func (n Note) DiffBody(prev NodeSpec) []byte {
 		}
 	}
 
-	// Line-oriented forward diff.
+	if int64(len(splitLines(p.Body)))*int64(len(splitLines(n.Body))) > MaxDiffCells {
+		return n.snapshotDiff()
+	}
+
+	// Line-oriented forward diff. A diff with no operation is stored as
+	// {"ops":null}, which reconstruction reads as a snapshot of an empty
+	// body, so an unchanged body is answered with a snapshot instead.
 	ops := lineDiff(p.Body, n.Body)
+	if len(ops) == 0 {
+		return n.snapshotDiff()
+	}
 	payload := diffLinePayload{Ops: ops}
 	data, _ := json.Marshal(payload)
 	return data

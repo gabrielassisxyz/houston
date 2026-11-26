@@ -482,6 +482,7 @@ func TestCoalesceKinds(t *testing.T) {
 		{"delete takes priority", []EventKind{KindChange, KindDelete, KindChange}, KindDelete},
 		{"move takes priority over change", []EventKind{KindChange, KindMoveCandidate}, KindMoveCandidate},
 		{"delete over move", []EventKind{KindMoveCandidate, KindDelete}, KindDelete},
+		{"dir delete over delete", []EventKind{KindDelete, KindDirDelete, KindChange}, KindDirDelete},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

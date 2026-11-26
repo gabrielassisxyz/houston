@@ -25,13 +25,15 @@ func getJSON(t *testing.T, mux *http.ServeMux, target string, into any) {
 }
 
 // The list walks the disk rather than the index, so it is also where a note
-// moved into the vault trash would come back; a deleted note must not.
+// moved into the vault trash would come back; a deleted note must not. Like
+// the indexer, it leaves out every dot-directory below the root, so a folder
+// named .trash further down is skipped too: the index never holds its notes.
 func TestVaultListAnswersTheMarkdownFilesOutsideTheTrash(t *testing.T) {
 	root := t.TempDir()
 	mux := newTestRouter(t, newTestDeps(t, root))
 	writeVaultFile(t, root, "top.md", "top\n")
 	writeVaultFile(t, root, "sub/nested.md", "nested\n")
-	writeVaultFile(t, root, "sub/.trash/kept.md", "a folder of that name below the root is not the trash\n")
+	writeVaultFile(t, root, "sub/.trash/skipped.md", "a dot-directory below the root, which the index never reads\n")
 	writeVaultFile(t, root, "attachment.txt", "not a note\n")
 	writeVaultFile(t, root, "doomed.md", "deleted\n")
 	if w := deleteVaultFile(t, mux, "doomed.md"); w.Code != http.StatusNoContent {
@@ -43,7 +45,7 @@ func TestVaultListAnswersTheMarkdownFilesOutsideTheTrash(t *testing.T) {
 	}
 	getJSON(t, mux, "/api/vault/list", &payload)
 	sort.Strings(payload.Files)
-	want := []string{"sub/.trash/kept.md", "sub/nested.md", "top.md"}
+	want := []string{"sub/nested.md", "top.md"}
 	if len(payload.Files) != len(want) {
 		t.Fatalf("files = %v, want %v", payload.Files, want)
 	}

@@ -132,7 +132,7 @@ func runServe(ctx context.Context, stdout, stderr io.Writer, cfg *config.NotesCo
 	svc := vault.New(g, cfg.Vault)
 
 	mux := http.NewServeMux()
-	if err := api.Register(mux, api.Deps{Graph: g, VaultRoot: cfg.Vault.Root}); err != nil {
+	if err := api.Register(mux, api.Deps{Graph: g, VaultRoot: cfg.Vault.Root, Vault: svc}); err != nil {
 		_ = g.Close()
 		_ = release()
 		return fmt.Errorf("houston serve: register routes: %w", err)

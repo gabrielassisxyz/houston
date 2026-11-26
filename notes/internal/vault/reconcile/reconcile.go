@@ -466,6 +466,58 @@ func (r *Reconciler) OnDelete(ctx context.Context, absPath string) error {
 	return nil
 }
 
+// OnDirDelete handles a directory removed or renamed away. No event names the
+// notes it held, so the path cache is asked: every note cached under the
+// directory whose file is gone is handed to OnDelete, which holds the delete
+// for the move window instead of tombstoning at once. A folder renamed inside
+// the vault therefore keeps each note's identity when its notes arrive at the
+// new path. A note still on disk under that path - the directory recreated
+// before this event was handled - is left alone.
+//
+// The prefix is compared exactly rather than with LIKE: a directory named
+// a_b must not take axb's notes with it, and LIKE also ignores case.
+func (r *Reconciler) OnDirDelete(ctx context.Context, absDir string) error {
+	prefix := r.relPath(absDir) + string(filepath.Separator)
+	var paths []string
+	err := r.g.DoRead(ctx, func(tx *graph.ReadTx) error {
+		rows, err := tx.Query(
+			`SELECT path FROM note_paths WHERE substr(path, 1, length(?)) = ? ORDER BY path`,
+			prefix, prefix,
+		)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var p string
+			if err := rows.Scan(&p); err != nil {
+				return err
+			}
+			paths = append(paths, p)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return fmt.Errorf("reconcile OnDirDelete %q: list cached paths: %w", absDir, err)
+	}
+
+	for _, rel := range paths {
+		abs := filepath.Join(r.vaultRoot, rel)
+		if _, statErr := os.Lstat(abs); statErr == nil {
+			continue
+		}
+		if err := r.OnDelete(ctx, abs); err != nil {
+			return fmt.Errorf("reconcile OnDirDelete %q: %w", absDir, err)
+		}
+	}
+	slog.Info("reconcile: directory gone",
+		"event", "dir_delete",
+		"path", absDir,
+		"notes", len(paths),
+	)
+	return nil
+}
+
 // FlushExpired tombstones all pending deletes whose age exceeds the window.
 // Tests call this directly after advancing the injected clock.
 // Returns the count of notes tombstoned and any error.
@@ -834,6 +886,42 @@ func (r *Reconciler) OnChange(ctx context.Context, absPath string) error {
 	if fm.ID == "" {
 		return r.OnCreate(ctx, absPath)
 	}
+	contentHash := HashBytes(raw)
+
+	// The watcher reports a recreated file as a change, never as a create, so
+	// a note deleted and written again arrives here. A delete still pending
+	// for it is matched by its id or its content hash, never by path alone: a
+	// new note written under a deleted note's name is not that note, and must
+	// not cancel its delete. A tombstoned id is the note coming back after its
+	// window. Both are OnCreate's to settle - it cancels the delete or revives
+	// the note - since updating a tombstoned row in place keeps it hidden.
+	if r.hasPendingDelete(fm.ID, contentHash) {
+		return r.OnCreate(ctx, absPath)
+	}
+	var tombstoned bool
+	if err := r.g.DoRead(ctx, func(tx *graph.ReadTx) error {
+		var err error
+		tombstoned, err = nodes.IsNoteTombstoned(ctx, tx, fm.ID)
+		return err
+	}); err != nil {
+		return fmt.Errorf("reconcile OnChange %q: tombstone check: %w", absPath, err)
+	}
+	if tombstoned {
+		return r.OnCreate(ctx, absPath)
+	}
+
+	// The path cache already records this id, path and content hash for a
+	// live note: the graph holds this file. The cold start's own id
+	// injections land here, one event per note it wrote, and each would
+	// otherwise cost a second full write of the note.
+	indexed, err := r.alreadyIndexed(ctx, fm.ID, relPath, contentHash)
+	if err != nil {
+		return fmt.Errorf("reconcile OnChange %q: %w", absPath, err)
+	}
+	if indexed {
+		slog.Debug("reconcile: change already indexed", "path", absPath, "node_id", fm.ID)
+		return nil
+	}
 
 	// The watcher reports a new file as a change, never as a create, so this
 	// is where a live copy of a note arrives. Updating the node from it would
@@ -849,7 +937,6 @@ func (r *Reconciler) OnChange(ctx context.Context, absPath string) error {
 	author := ResolveAuthor(fm.Author)
 	title := resolveTitle(fm, absPath)
 	body := extractBody(raw)
-	contentHash := HashBytes(raw)
 
 	var promoted int
 	var displaced *pendingDelete
@@ -1274,7 +1361,19 @@ func locateNoteFile(ctx context.Context, g *graph.Graph, vaultRoot, noteID strin
 
 	var match string
 	_ = filepath.WalkDir(vaultRoot, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
+		if walkErr != nil {
+			return nil
+		}
+		// A copy in .trash or another dot-directory is not the note's file;
+		// judged below the root only, so a vault under a dot-named directory
+		// is still searched.
+		if rel, relErr := vaultfile.VaultRel(vaultRoot, path); relErr != nil || vaultfile.IsHiddenRel(rel) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() || !vaultfile.IsNoteFile(path) {
 			return nil
 		}
 		raw, readErr := os.ReadFile(path)
@@ -1369,6 +1468,43 @@ func (r *Reconciler) consumePendingDelete(noteID, contentHash string) *pendingDe
 	}
 
 	return nil
+}
+
+// alreadyIndexed reports whether note_paths binds id to relPath with
+// contentHash, for a live note.
+func (r *Reconciler) alreadyIndexed(ctx context.Context, id, relPath, contentHash string) (bool, error) {
+	var n int
+	err := r.g.DoRead(ctx, func(tx *graph.ReadTx) error {
+		return tx.QueryRow(
+			`SELECT COUNT(*) FROM note_paths np
+			 JOIN nodes n ON n.id = np.uuid AND n.type = 'note' AND n.deleted_at IS NULL
+			 WHERE np.uuid = ? AND np.path = ? AND np.content_hash = ?`,
+			id, relPath, contentHash,
+		).Scan(&n)
+	})
+	if err != nil {
+		return false, fmt.Errorf("check indexed state: %w", err)
+	}
+	return n > 0, nil
+}
+
+// hasPendingDelete reports, without consuming it, whether a delete is pending
+// for the note with this id or this content hash.
+func (r *Reconciler) hasPendingDelete(noteID, contentHash string) bool {
+	r.pendingMu.Lock()
+	defer r.pendingMu.Unlock()
+	if _, ok := r.pendingDeletes[noteID]; ok && noteID != "" {
+		return true
+	}
+	if contentHash == "" {
+		return false
+	}
+	for _, pd := range r.pendingDeletes {
+		if pd.contentHash == contentHash {
+			return true
+		}
+	}
+	return false
 }
 
 // pathClaimed finishes a committed claimPathInTx. The note now bound to a path
